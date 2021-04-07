@@ -2,10 +2,6 @@
 
 use std::collections::HashMap;
 
-use futures::stream::futures_unordered;
-use futures::{Future, IntoFuture, Stream};
-use hyper::client::connect::Connect;
-use hyper::Uri;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::client::{Client, Response};
@@ -157,58 +153,23 @@ pub struct StoreStats {
 /// Returns statistics about the leader member of a cluster.
 ///
 /// Fails if JSON decoding fails, which suggests a bug in our schema.
-pub fn leader_stats<C>(
-    client: &Client<C>,
-) -> impl Future<Item = Response<LeaderStats>, Error = Error> + Send
-where
-    C: Clone + Connect,
-{
-    let url = build_url(&client.endpoints()[0], "v2/stats/leader");
-    let uri = url.parse().map_err(Error::from).into_future();
-
-    client.request(uri)
+pub async fn leader_stats(client: &Client) -> Result<Response<LeaderStats>, Error> {
+    client.request_first_ok("v2/stats/leader").await
 }
+
+type VecResultResponse<T> = Vec<Result<Response<T>, Error>>;
 
 /// Returns statistics about each cluster member the client was initialized with.
 ///
 /// Fails if JSON decoding fails, which suggests a bug in our schema.
-pub fn self_stats<C>(
-    client: &Client<C>,
-) -> impl Stream<Item = Response<SelfStats>, Error = Error> + Send
-where
-    C: Clone + Connect,
-{
-    let futures = client.endpoints().iter().map(|endpoint| {
-        let url = build_url(&endpoint, "v2/stats/self");
-        let uri = url.parse().map_err(Error::from).into_future();
-
-        client.request(uri)
-    });
-
-    futures_unordered(futures)
+pub async fn self_stats(client: &Client) -> VecResultResponse<SelfStats> {
+    client.request_on_each_endpoint("v2/stats/self").await
 }
 
 /// Returns statistics about operations handled by each etcd member the client was initialized
 /// with.
 ///
 /// Fails if JSON decoding fails, which suggests a bug in our schema.
-pub fn store_stats<C>(
-    client: &Client<C>,
-) -> impl Stream<Item = Response<StoreStats>, Error = Error> + Send
-where
-    C: Clone + Connect,
-{
-    let futures = client.endpoints().iter().map(|endpoint| {
-        let url = build_url(&endpoint, "v2/stats/store");
-        let uri = url.parse().map_err(Error::from).into_future();
-
-        client.request(uri)
-    });
-
-    futures_unordered(futures)
-}
-
-/// Constructs the full URL for an API call.
-fn build_url(endpoint: &Uri, path: &str) -> String {
-    format!("{}{}", endpoint, path)
+pub async fn store_stats(client: &Client) -> VecResultResponse<StoreStats> {
+    client.request_on_each_endpoint("v2/stats/store").await
 }

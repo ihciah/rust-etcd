@@ -1,39 +1,32 @@
 [package]
-authors = ["Jimmy Cuadra <jimmy@jimmycuadra.com>"]
+authors = ["Jimmy Cuadra <jimmy@jimmycuadra.com>", "Jake Heinz <jake@discord.com>"]
 description = "A client library for CoreOS's etcd."
 documentation = "https://docs.rs/etcd"
 edition = "2018"
-homepage = "https://github.com/jimmycuadra/rust-etcd"
+homepage = "https://github.com/discord/rust-etcd"
 keywords = ["etcd", "coreos", "database"]
 license = "MIT"
 name = "etcd"
 readme = "README.md"
-repository = "https://github.com/jimmycuadra/rust-etcd"
-version = "0.9.0"
+repository = "https://github.com/discord/rust-etcd"
+version = "0.10.0"
 
 [lib]
 test = false
 
 [dependencies]
-futures = "0.1.25"
-hyper = "0.12.13"
-http = "0.1.13"
-serde = "1.0.80"
-serde_derive = "1.0.80"
-serde_json = "1.0.32"
-url = "1.7.1"
-base64 = "0.10.0"
+bytes = "1.0"
+futures = "0.3"
+http = "0.2"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+url = "2.2"
+base64 = "0.13.0"
 log = "0.4.6"
-tokio = "0.1.13"
-
-[dependencies.hyper-tls]
-optional = true
-version = "0.3.1"
-
-[dependencies.native-tls]
-optional = true
-version = "0.2.2"
+tokio = "1.4"
+reqwest = { version = "0.11", default_features = false }
 
 [features]
 default = ["tls"]
-tls = ["hyper-tls", "native-tls"]
+tls = ["reqwest/default-tls"]

@@ -68,7 +68,8 @@
 //!
 //! Crate `etcd` has one Cargo feature, `tls`, which adds HTTPS support via the `Client::https`
 //! constructor. This feature is enabled by default.
-#![deny(missing_debug_implementations, missing_docs, warnings)]
+// JAKE-TODO: Uncomment.
+// #![deny(missing_debug_implementations, missing_docs, warnings)]
 
 pub use crate::client::{BasicAuth, Client, ClusterInfo, Health, Response};
 pub use crate::error::{ApiError, Error};
@@ -81,7 +82,5 @@ pub mod stats;
 
 mod client;
 mod error;
-mod first_ok;
-mod http;
 mod options;
 mod version;
