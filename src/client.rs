@@ -15,28 +15,9 @@ use serde_json;
 
 use crate::error::{ApiError, Error};
 
-// header! {
-//     /// The `X-Etcd-Cluster-Id` header.
-//     (XEtcdClusterId, "X-Etcd-Cluster-Id") => [String]
-// }
 const XETCD_CLUSTER_ID: &str = "X-Etcd-Cluster-Id";
-
-// header! {
-//     /// The `X-Etcd-Index` HTTP header.
-//     (XEtcdIndex, "X-Etcd-Index") => [u64]
-// }
 const XETCD_INDEX: &str = "X-Etcd-Index";
-
-// header! {
-//     /// The `X-Raft-Index` HTTP header.
-//     (XRaftIndex, "X-Raft-Index") => [u64]
-// }
 const XRAFT_INDEX: &str = "X-Raft-Index";
-
-// header! {
-//     /// The `X-Raft-Term` HTTP header.
-//     (XRaftTerm, "X-Raft-Term") => [u64]
-// }
 const XRAFT_TERM: &str = "X-Raft-Term";
 
 /// API client for etcd.
@@ -76,8 +57,44 @@ impl Client {
     /// # Errors
     ///
     /// Panics if no endpoints are provided or if any of the endpoints is an invalid URL.
-    pub fn new<T: Into<String>>(endpoints: &[T], basic_auth: Option<BasicAuth>) -> Self {
-        todo!()
+    pub fn new<T: Into<String>>(endpoints: &[&str], basic_auth: Option<BasicAuth>) -> Self {
+        if endpoints.is_empty() {
+            panic!("invariant: no endpoints provided")
+        }
+
+        let endpoints = Arc::new(
+            endpoints
+                .into_iter()
+                .map(|e| {
+                    e.parse()
+                        .expect(&format!("invariant: could not parse endpoint: {}", e))
+                })
+                .collect(),
+        );
+
+        let client_builder = reqwest::ClientBuilder::new();
+        let client_builder = match basic_auth {
+            Some(auth) => {
+                let mut headers = HeaderMap::new();
+                let basic_auth = base64::encode(format!("{}:{}", auth.username, auth.password));
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Basic {}", basic_auth))
+                        .expect("invariant: could not create basic auth header."),
+                );
+                client_builder.default_headers(headers)
+            }
+            None => client_builder,
+        };
+
+        let http_client = client_builder
+            .build()
+            .expect("invariant: could not create http client");
+
+        Self {
+            endpoints,
+            http_client,
+        }
     }
 
     /// Lets other internal code access the `HttpClient`.
@@ -222,20 +239,29 @@ impl Client {
         T: DeserializeOwned,
     {
         let response = self.http_client.get(uri).send().await?;
-        let status = response.status();
-        let cluster_info = ClusterInfo::from(response.headers());
-        let body = response.bytes().await?;
+        parse_etcd_response(response, |s| s == StatusCode::OK).await
+    }
+}
 
-        if status == StatusCode::OK {
-            match serde_json::from_slice::<T>(&body) {
-                Ok(data) => Ok(Response { data, cluster_info }),
-                Err(error) => Err(Error::Serialization(error)),
-            }
-        } else {
-            match serde_json::from_slice::<ApiError>(&body) {
-                Ok(error) => Err(Error::Api(error)),
-                Err(error) => Err(Error::Serialization(error)),
-            }
+pub(crate) async fn parse_etcd_response<T>(
+    response: reqwest::Response,
+    status_code_is_success: impl FnOnce(StatusCode) -> bool,
+) -> Result<Response<T>, Error>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status();
+    let cluster_info = ClusterInfo::from(response.headers());
+    let body = response.bytes().await?;
+    if status_code_is_success(status) {
+        match serde_json::from_slice::<T>(&body) {
+            Ok(data) => Ok(Response { data, cluster_info }),
+            Err(error) => Err(Error::Serialization(error)),
+        }
+    } else {
+        match serde_json::from_slice::<ApiError>(&body) {
+            Ok(error) => Err(Error::Api(error)),
+            Err(error) => Err(Error::Serialization(error)),
         }
     }
 }

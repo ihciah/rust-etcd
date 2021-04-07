@@ -66,23 +66,74 @@ pub struct SetOptions<'a> {
     pub refresh: bool,
 }
 
-impl<'a> SetOptions<'a> {
-    /// Converts this `SetOptions` into option pairs that can be used to create a request body from these bytes.
-    ///
-    /// JAKE-TODO: Can we just make this return a `Bytes` for the body!
-    pub(crate) fn into_request_body(self) -> Result<Bytes, Error> {
-        let mut option_pairs = vec![];
+impl GetOptions {
+    pub(crate) fn into_query_params(self) -> String {
+        let mut serializer = Serializer::new(String::new());
 
-        if let Some(value) = self.value {
-            option_pairs.push(("value", Cow::Borrowed(value)));
+        serializer.append_pair("recursive", bool_to_str(self.recursive));
+
+        if let Some(sort) = self.sort {
+            serializer.append_pair("sorted", bool_to_str(sort));
         }
 
-        if let Some(ref ttl) = self.ttl {
-            option_pairs.push(("ttl", Cow::Owned(ttl.to_string())));
+        if self.wait {
+            serializer.append_pair("wait", bool_to_str(true));
+        }
+
+        if let Some(wait_index) = self.wait_index {
+            serializer.append_pair("waitIndex", &wait_index.to_string());
+        }
+
+        serializer.finish()
+    }
+}
+
+impl<'a> DeleteOptions<'a> {
+    /// Converts this `DeleteOptions` into a request body for use with the set request.
+    pub(crate) fn into_query_params(self) -> Result<String, Error> {
+        let mut serializer = Serializer::new(String::new());
+
+        if let Some(recursive) = self.recursive {
+            serializer.append_pair("recursive", bool_to_str(recursive));
         }
 
         if let Some(dir) = self.dir {
-            option_pairs.push(("dir", Cow::Borrowed(bool_to_str(dir))));
+            serializer.append_pair("dir", bool_to_str(dir));
+        }
+
+        if let Some(conditions) = self.conditions {
+            if conditions.is_empty() {
+                return Err(Error::InvalidConditions);
+            }
+
+            if let Some(modified_index) = conditions.modified_index {
+                serializer.append_pair("prevIndex", &modified_index.to_string());
+            }
+
+            if let Some(value) = conditions.value {
+                serializer.append_pair("prevValue", value);
+            }
+        }
+
+        Ok(serializer.finish())
+    }
+}
+
+impl<'a> SetOptions<'a> {
+    /// Converts this `SetOptions` into a request body for use with the set request.
+    pub(crate) fn into_request_body(self) -> Result<Bytes, Error> {
+        let mut serializer = Serializer::new(String::new());
+
+        if let Some(value) = self.value {
+            serializer.append_pair("value", value);
+        }
+
+        if let Some(ref ttl) = self.ttl {
+            serializer.append_pair("ttl", &ttl.to_string());
+        }
+
+        if let Some(dir) = self.dir {
+            serializer.append_pair("dir", bool_to_str(dir));
         }
 
         let prev_exist = match self.prev_exist {
@@ -93,11 +144,11 @@ impl<'a> SetOptions<'a> {
         // If we are calling refresh, we should also ensure we are setting prevExist.
         if prev_exist || self.refresh {
             let prev_exist = prev_exist || self.refresh;
-            option_pairs.push(("prevExist", Cow::Borrowed(bool_to_str(prev_exist))));
+            serializer.append_pair("prevExist", bool_to_str(prev_exist));
         }
 
         if self.refresh {
-            option_pairs.push(("refresh", Cow::Borrowed(bool_to_str(true))));
+            serializer.append_pair("refresh", bool_to_str(true));
         }
 
         if let Some(conditions) = self.conditions {
@@ -106,16 +157,14 @@ impl<'a> SetOptions<'a> {
             }
 
             if let Some(modified_index) = conditions.modified_index {
-                option_pairs.push(("prevIndex", Cow::Owned(modified_index.to_string())));
+                serializer.append_pair("prevIndex", &modified_index.to_string());
             }
 
             if let Some(value) = conditions.value {
-                option_pairs.push(("prevValue", Cow::Borrowed(value)));
+                serializer.append_pair("prevValue", value);
             }
         }
 
-        let mut serializer = Serializer::new(String::new());
-        serializer.extend_pairs(option_pairs);
         Ok(serializer.finish().into())
     }
 }
