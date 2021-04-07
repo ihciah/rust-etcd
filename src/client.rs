@@ -13,7 +13,10 @@ use serde::de::DeserializeOwned;
 use serde_derive::{Deserialize, Serialize};
 use serde_json;
 
-use crate::error::{ApiError, Error};
+use crate::{
+    error::{ApiError, Error},
+    VersionInfo,
+};
 
 const XETCD_CLUSTER_ID: &str = "X-Etcd-Cluster-Id";
 const XETCD_INDEX: &str = "X-Etcd-Index";
@@ -102,75 +105,14 @@ impl Client {
         &self.http_client
     }
 
-    /// Lets other internal code access the cluster endpoints.
-    pub(crate) fn endpoints(&self) -> &[Uri] {
-        &self.endpoints
-    }
-
     /// Runs a basic health check against each etcd member.
-    pub fn health(&self) -> () {
-        // let futures = self.endpoints.iter().map(|endpoint| {
-        //     let url = build_url(&endpoint, "health");
-        //     let uri = url.parse().map_err(Error::from).into_future();
-        //     let cloned_client = self.http_client.clone();
-        //     let response = uri.and_then(move |uri| cloned_client.get(uri).map_err(Error::from));
-        //     response.and_then(|response| {
-        //         let status = response.status();
-        //         let cluster_info = ClusterInfo::from(response.headers());
-        //         let body = response.into_body().concat2().map_err(Error::from);
-
-        //         body.and_then(move |ref body| {
-        //             if status == StatusCode::OK {
-        //                 match serde_json::from_slice::<Health>(body) {
-        //                     Ok(data) => Ok(Response { data, cluster_info }),
-        //                     Err(error) => Err(Error::Serialization(error)),
-        //                 }
-        //             } else {
-        //                 match serde_json::from_slice::<ApiError>(body) {
-        //                     Ok(error) => Err(Error::Api(error)),
-        //                     Err(error) => Err(Error::Serialization(error)),
-        //                 }
-        //             }
-        //         })
-        //     })
-        // });
-
-        // futures_unordered(futures)
-
-        todo!()
+    pub async fn health(&self) -> Vec<Result<Response<Health>, Error>> {
+        self.request_on_each_endpoint("health").await
     }
 
     /// Returns version information from each etcd cluster member the client was initialized with.
-    pub fn versions(&self) -> () {
-        todo!();
-        // let futures = self.endpoints.iter().map(|endpoint| {
-        //     let url = build_url(&endpoint, "version");
-        //     let uri = url.parse().map_err(Error::from).into_future();
-        //     let cloned_client = self.http_client.clone();
-        //     let response = uri.and_then(move |uri| cloned_client.get(uri).map_err(Error::from));
-        //     response.and_then(|response| {
-        //         let status = response.status();
-        //         let cluster_info = ClusterInfo::from(response.headers());
-        //         let body = response.into_body().concat2().map_err(Error::from);
-
-        //         body.and_then(move |ref body| {
-        //             if status == StatusCode::OK {
-        //                 match serde_json::from_slice::<VersionInfo>(body) {
-        //                     Ok(data) => Ok(Response { data, cluster_info }),
-        //                     Err(error) => Err(Error::Serialization(error)),
-        //                 }
-        //             } else {
-        //                 match serde_json::from_slice::<ApiError>(body) {
-        //                     Ok(error) => Err(Error::Api(error)),
-        //                     Err(error) => Err(Error::Serialization(error)),
-        //                 }
-        //             }
-        //         })
-        //     })
-        // });
-
-        // futures_unordered(futures)
-        todo!()
+    pub async fn versions(&self) -> Vec<Result<Response<VersionInfo>, Error>> {
+        self.request_on_each_endpoint("version").await
     }
 
     pub(crate) async fn first_ok<'a, H, F, T, E>(&'a self, handler: H) -> Result<T, Vec<E>>
@@ -250,10 +192,10 @@ pub(crate) async fn parse_etcd_response<T>(
 where
     T: DeserializeOwned,
 {
-    let status = response.status();
+    let status_code = response.status();
     let cluster_info = ClusterInfo::from(response.headers());
     let body = response.bytes().await?;
-    if status_code_is_success(status) {
+    if status_code_is_success(status_code) {
         match serde_json::from_slice::<T>(&body) {
             Ok(data) => Ok(Response { data, cluster_info }),
             Err(error) => Err(Error::Serialization(error)),

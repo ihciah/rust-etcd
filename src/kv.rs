@@ -4,14 +4,11 @@
 //! of key-value pairs. For example, "/foo" is a key if it has a value, but it is a directory if
 //! there other other key-value pairs "underneath" it, such as "/foo/bar".
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use http::{StatusCode, Uri};
 use serde_derive::{Deserialize, Serialize};
-use serde_json;
-use tokio::time::{timeout, Timeout};
-use url::Url;
+use tokio::time::timeout;
 
 pub use crate::error::WatchError;
 
@@ -465,7 +462,7 @@ where
         key,
         SetOptions {
             dir: Some(true),
-            ttl: ttl,
+            ttl,
             ..Default::default()
         },
     )
@@ -527,7 +524,7 @@ where
         SetOptions {
             dir: Some(true),
             prev_exist: Some(true),
-            ttl: ttl,
+            ttl,
             ..Default::default()
         },
     )
@@ -572,11 +569,11 @@ where
 
     if let Some(duration) = options.timeout {
         match timeout(duration, fut).await {
-            Ok(result) => result.map_err(|e| WatchError::Other(e)),
+            Ok(result) => result.map_err(WatchError::Other),
             Err(_elapsed) => Err(WatchError::Timeout),
         }
     } else {
-        fut.await.map_err(|e| WatchError::Other(e))
+        fut.await.map_err(WatchError::Other)
     }
 }
 
