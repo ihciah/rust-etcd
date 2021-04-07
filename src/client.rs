@@ -1,6 +1,6 @@
 //! Contains the etcd client. All API calls are made via the client.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures::Future;
 use http::{
@@ -52,6 +52,7 @@ pub struct Health {
 pub struct ClientBuilder {
     endpoints: Vec<Uri>,
     basic_auth: Option<BasicAuth>,
+    connect_timeout: Duration,
     #[cfg(feature = "tls")]
     tls_client_identity: Option<Identity>,
     #[cfg(feature = "tls")]
@@ -79,6 +80,7 @@ impl ClientBuilder {
         Self {
             endpoints,
             basic_auth: None,
+            connect_timeout: Duration::from_secs(90),
             #[cfg(feature = "tls")]
             tls_client_identity: None,
             #[cfg(feature = "tls")]
@@ -89,6 +91,14 @@ impl ClientBuilder {
     /// Configures the client to use basic auth, with the given username and password.
     pub fn with_basic_auth(mut self, username: String, password: String) -> Self {
         self.basic_auth = Some(BasicAuth { username, password });
+        self
+    }
+
+    /// Configures the client to use a specific connect timeout.
+    ///
+    /// The default is 90 seconds.
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
         self
     }
 
@@ -114,6 +124,7 @@ impl ClientBuilder {
     /// Constructs a client from the builder.
     pub fn build(self) -> Client {
         let client_builder = reqwest::ClientBuilder::new();
+        let client_builder = client_builder.connect_timeout(self.connect_timeout);
         let client_builder = match self.basic_auth {
             Some(auth) => {
                 let mut headers = HeaderMap::new();
@@ -243,7 +254,7 @@ impl Client {
         let mut results = Vec::with_capacity(self.endpoints.len());
 
         for endpoint in self.endpoints.iter() {
-            let result = self.request(format!("{}{}", endpoint, path)).await;
+            let result = self.request(build_url(endpoint, path)).await;
             results.push(result);
         }
 
