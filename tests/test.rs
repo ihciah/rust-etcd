@@ -2,30 +2,24 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::Deref;
 
-use etcd::{kv, Client};
+use etcd::{kv, Client, ClientBuilder};
 use futures::Future;
-use hyper::client::connect::Connect;
-use hyper::client::{Client as Hyper, HttpConnector};
-use hyper_tls::HttpsConnector;
-use native_tls::{Certificate, Identity, TlsConnector};
+use reqwest::{Certificate, Identity};
 use tokio::runtime::Runtime;
 
 /// Wrapper around Client that automatically cleans up etcd after each test.
-pub struct TestClient<C>
-where
-    C: Clone + Connect + Sync + 'static,
-{
-    c: Client<C>,
+pub struct TestClient {
+    client: Client,
     run_destructor: bool,
     runtime: Runtime,
 }
 
-impl TestClient<HttpConnector> {
+impl TestClient {
     /// Creates a new client for a test.
     #[allow(dead_code)]
-    pub fn new() -> TestClient<HttpConnector> {
-        TestClient {
-            c: Client::new(&["http://etcd:2379"], None).unwrap(),
+    pub fn new() -> Self {
+        Self {
+            client: Client::new(&["http://etcd:2379"]),
             run_destructor: true,
             runtime: Runtime::new().expect("failed to create Tokio runtime"),
         }
@@ -33,85 +27,68 @@ impl TestClient<HttpConnector> {
 
     /// Creates a new client for a test that will not clean up the key space afterwards.
     #[allow(dead_code)]
-    pub fn no_destructor() -> TestClient<HttpConnector> {
-        TestClient {
-            c: Client::new(&["http://etcd:2379"], None).unwrap(),
-            run_destructor: false,
-            runtime: Runtime::new().expect("failed to create Tokio runtime"),
-        }
+    pub fn no_destructor() -> Self {
+        let mut client = Self::new();
+        client.run_destructor = false;
+        client
     }
 
     /// Creates a new HTTPS client for a test.
     #[allow(dead_code)]
-    pub fn https(use_client_cert: bool) -> TestClient<HttpsConnector<HttpConnector>> {
+    pub fn https(use_client_cert: bool) -> TestClient {
+        let client_builder = ClientBuilder::new(&["https://etcdsecure:2379"]);
+
         let mut ca_cert_file = File::open("/source/tests/ssl/ca.der").unwrap();
         let mut ca_cert_buffer = Vec::new();
         ca_cert_file.read_to_end(&mut ca_cert_buffer).unwrap();
 
-        let mut builder = TlsConnector::builder();
-        builder.add_root_certificate(Certificate::from_der(&ca_cert_buffer).unwrap());
+        let certificate = Certificate::from_der(&ca_cert_buffer).unwrap();
+        let client_builder = client_builder.with_root_certificate(certificate);
 
-        if use_client_cert {
+        let client_builder = if use_client_cert {
             let mut pkcs12_file = File::open("/source/tests/ssl/client.p12").unwrap();
             let mut pkcs12_buffer = Vec::new();
             pkcs12_file.read_to_end(&mut pkcs12_buffer).unwrap();
 
-            builder.identity(Identity::from_pkcs12(&pkcs12_buffer, "secret").unwrap());
-        }
-
-        let tls_connector = builder.build().unwrap();
-
-        let mut http_connector = HttpConnector::new(1);
-        http_connector.enforce_http(false);
-        let https_connector = HttpsConnector::from((http_connector, tls_connector));
-
-        let hyper = Hyper::builder().build(https_connector);
+            let identity = Identity::from_pkcs12_der(&pkcs12_buffer, "secret").unwrap();
+            client_builder.with_client_identity(identity)
+        } else {
+            client_builder
+        };
 
         TestClient {
-            c: Client::custom(hyper, &["https://etcdsecure:2379"], None).unwrap(),
+            client: client_builder.build(),
             run_destructor: true,
             runtime: Runtime::new().expect("failed to create Tokio runtime"),
         }
     }
 }
 
-impl<C> TestClient<C>
-where
-    C: Clone + Connect + Sync + 'static,
-{
+impl TestClient {
     #[allow(dead_code)]
-    pub fn run<F, O, E>(&mut self, future: F)
+    pub fn run<'a, F, U, R>(&'a mut self, func: F) -> R
     where
-        F: Future<Item = O, Error = E> + Send + 'static,
-        O: Send + 'static,
-        E: Send + 'static,
+        F: FnOnce(&'a Client) -> U,
+        U: Future<Output = R> + 'a,
     {
-        let _ = self.runtime.block_on(future.map(|_| ()).map_err(|_| ()));
+        self.runtime.block_on((func)(&self.client))
     }
 }
 
-impl<C> Drop for TestClient<C>
-where
-    C: Clone + Connect + Sync + 'static,
-{
+impl Drop for TestClient {
     fn drop(&mut self) {
         if self.run_destructor {
-            let future = kv::delete(&self.c, "/test", true)
-                .map(|_| ())
-                .map_err(|_| ());
-
-            let _ = self.runtime.block_on(future);
+            self.runtime.block_on(async {
+                kv::delete(&self.client, "/test", true).await.ok();
+            });
         }
     }
 }
 
-impl<C> Deref for TestClient<C>
-where
-    C: Clone + Connect + Sync + 'static,
-{
-    type Target = Client<C>;
+impl Deref for TestClient {
+    type Target = Client;
 
     fn deref(&self) -> &Self::Target {
-        &self.c
+        &self.client
     }
 }

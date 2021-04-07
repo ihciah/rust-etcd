@@ -31,3 +31,6 @@ rand = "0.8.0"
 [features]
 default = ["tls"]
 tls = ["reqwest/native-tls"]
+
+[dev-dependencies]
+tokio = { version = "1.4", features = ["rt-multi-thread"] }

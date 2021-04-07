@@ -89,8 +89,15 @@ impl ClientBuilder {
     }
 
     /// Configures the client to use basic auth, with the given username and password.
-    pub fn with_basic_auth(mut self, username: String, password: String) -> Self {
-        self.basic_auth = Some(BasicAuth { username, password });
+    pub fn with_basic_auth(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.basic_auth = Some(BasicAuth {
+            username: username.into(),
+            password: password.into(),
+        });
         self
     }
 

@@ -1,5 +1,4 @@
 use etcd::stats;
-use futures::{Future, Stream};
 
 use crate::test::TestClient;
 
@@ -8,26 +7,23 @@ mod test;
 #[test]
 fn leader_stats() {
     let mut client = TestClient::no_destructor();
-
-    let work = stats::leader_stats(&client);
-
-    client.run(work);
+    client.run(|c| stats::leader_stats(&c)).unwrap();
 }
 
 #[test]
 fn self_stats() {
     let mut client = TestClient::no_destructor();
-
-    let work = stats::self_stats(&client).collect().and_then(|_| Ok(()));
-
-    client.run(work);
+    let results = client.run(|c| stats::self_stats(&c));
+    for result in results {
+        result.unwrap();
+    }
 }
 
 #[test]
 fn store_stats() {
     let mut client = TestClient::no_destructor();
-
-    let work = stats::store_stats(&client).collect().and_then(|_| Ok(()));
-
-    client.run(work);
+    let results = client.run(|c| stats::store_stats(&c));
+    for result in results {
+        result.unwrap();
+    }
 }
