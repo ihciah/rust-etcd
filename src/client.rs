@@ -9,7 +9,7 @@ use http::{
 };
 use log::error;
 use rand::{prelude::SliceRandom, thread_rng};
-use reqwest::IntoUrl;
+use reqwest::{Certificate, Identity, IntoUrl};
 use serde::de::DeserializeOwned;
 use serde_derive::{Deserialize, Serialize};
 use serde_json;
@@ -35,11 +35,11 @@ pub struct Client {
 
 /// A username and password to use for HTTP basic authentication.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct BasicAuth {
+struct BasicAuth {
     /// The username to use for authentication.
-    pub username: String,
+    username: String,
     /// The password to use for authentication.
-    pub password: String,
+    password: String,
 }
 
 /// A value returned by the health check API endpoint to indicate a healthy cluster member.
@@ -49,35 +49,72 @@ pub struct Health {
     pub health: String,
 }
 
-impl Client {
-    /// Constructs a new client using the HTTP protocol.
-    ///
-    /// # Parameters
-    ///
-    /// * endpoints: URLs for one or more cluster members. When making an API call, the client will
-    /// make the call to each member in order until it receives a successful respponse.
-    /// * basic_auth: Credentials for HTTP basic authentication.
-    ///
+pub struct ClientBuilder {
+    endpoints: Vec<Uri>,
+    basic_auth: Option<BasicAuth>,
+    #[cfg(feature = "tls")]
+    tls_client_identity: Option<Identity>,
+    #[cfg(feature = "tls")]
+    tls_root_certificates: Vec<Certificate>,
+}
+
+impl ClientBuilder {
+    /// Creates a new client builder that can be used to configure and customize the etcd client.
     /// # Errors
     ///
     /// Panics if no endpoints are provided or if any of the endpoints is an invalid URL.
-    pub fn new<T: Into<String>>(endpoints: &[&str], basic_auth: Option<BasicAuth>) -> Self {
+    pub fn new(endpoints: &[&str]) -> Self {
         if endpoints.is_empty() {
             panic!("invariant: no endpoints provided")
         }
 
-        let endpoints = Arc::new(
-            endpoints
-                .into_iter()
-                .map(|e| {
-                    e.parse()
-                        .expect(&format!("invariant: could not parse endpoint: {}", e))
-                })
-                .collect(),
-        );
+        let endpoints = endpoints
+            .into_iter()
+            .map(|e| {
+                e.parse()
+                    .expect(&format!("invariant: could not parse endpoint: {}", e))
+            })
+            .collect();
 
+        Self {
+            endpoints,
+            basic_auth: None,
+            #[cfg(feature = "tls")]
+            tls_client_identity: None,
+            #[cfg(feature = "tls")]
+            tls_root_certificates: Vec::new(),
+        }
+    }
+
+    /// Configures the client to use basic auth, with the given username and password.
+    pub fn with_basic_auth(mut self, username: String, password: String) -> Self {
+        self.basic_auth = Some(BasicAuth { username, password });
+        self
+    }
+
+    #[cfg(feature = "tls")]
+    /// Uses a specific client certificate ([`Identity`]) for TLS connections to etcd.
+    pub fn with_client_identity(mut self, identity: Identity) -> Self {
+        self.tls_client_identity = Some(identity);
+        self
+    }
+
+    #[cfg(feature = "tls")]
+    /// Adds a specific root certificate that will be accepted by the client.
+    ///
+    /// Useful if your etcd server is using TLS with self-signed certificates.
+    ///
+    /// NOTE: Calling this function multiple times adds each certificate to the list of
+    /// allowed root certificate authorities.
+    pub fn with_root_certificate(mut self, certificate: Certificate) -> Self {
+        self.tls_root_certificates.push(certificate);
+        self
+    }
+
+    /// Constructs a client from the builder.
+    pub fn build(self) -> Client {
         let client_builder = reqwest::ClientBuilder::new();
-        let client_builder = match basic_auth {
+        let client_builder = match self.basic_auth {
             Some(auth) => {
                 let mut headers = HeaderMap::new();
                 let basic_auth = base64::encode(format!("{}:{}", auth.username, auth.password));
@@ -91,14 +128,45 @@ impl Client {
             None => client_builder,
         };
 
+        #[cfg(feature = "tls")]
+        let client_builder = {
+            let client_builder = if let Some(identity) = self.tls_client_identity {
+                client_builder.identity(identity)
+            } else {
+                client_builder
+            };
+
+            self.tls_root_certificates
+                .into_iter()
+                .fold(client_builder, |client_builder, certificate| {
+                    client_builder.add_root_certificate(certificate)
+                })
+        };
+
         let http_client = client_builder
             .build()
             .expect("invariant: could not create http client");
 
-        Self {
-            endpoints,
+        Client {
+            endpoints: Arc::new(self.endpoints),
             http_client,
         }
+    }
+}
+
+impl Client {
+    /// Constructs a new client using the HTTP protocol. For more advanced configuration, use [`ClientBuilder`]
+    ///
+    /// # Parameters
+    ///
+    /// * endpoints: URLs for one or more cluster members. When making an API call, the client will
+    /// make the call to each member in order until it receives a successful respponse.
+    ///
+    /// # Errors
+    ///
+    /// Panics if no endpoints are provided or if any of the endpoints is an invalid URL.
+    pub fn new(endpoints: &[&str]) -> Self {
+        ClientBuilder::new(endpoints).build()
     }
 
     /// Lets other internal code access the `HttpClient`.

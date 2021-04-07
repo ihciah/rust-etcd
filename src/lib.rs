@@ -71,7 +71,7 @@
 // JAKE-TODO: Uncomment.
 // #![deny(missing_debug_implementations, missing_docs, warnings)]
 
-pub use crate::client::{BasicAuth, Client, ClusterInfo, Health, Response};
+pub use crate::client::{Client, ClientBuilder, ClusterInfo, Health, Response};
 pub use crate::error::{ApiError, Error};
 pub use crate::version::VersionInfo;
 

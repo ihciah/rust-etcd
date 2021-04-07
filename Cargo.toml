@@ -30,4 +30,4 @@ rand = "0.8.0"
 
 [features]
 default = ["tls"]
-tls = ["reqwest/default-tls"]
+tls = ["reqwest/native-tls"]
