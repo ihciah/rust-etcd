@@ -2,7 +2,10 @@
 //!
 //! These API endpoints are used to manage cluster membership.
 
-use crate::{client::parse_etcd_response, ApiError, Client, ClusterInfo, Error, Response};
+use crate::{
+    client::{parse_empty_response, parse_etcd_response},
+    Client, Error, Response,
+};
 
 use http::{StatusCode, Uri};
 use serde_derive::{Deserialize, Serialize};
@@ -130,21 +133,4 @@ pub async fn update(client: &Client, id: String, peer_urls: Vec<String>) -> Etcd
 /// Constructs the full URL for an API call.
 fn build_url(endpoint: &Uri, path: &str) -> String {
     format!("{}v2/members{}", endpoint, path)
-}
-
-async fn parse_empty_response(response: reqwest::Response) -> Result<Response<()>, Error> {
-    let status_code = response.status();
-    let cluster_info = ClusterInfo::from(response.headers());
-    let body = response.bytes().await?;
-    if status_code == StatusCode::NO_CONTENT {
-        Ok(Response {
-            data: (),
-            cluster_info,
-        })
-    } else {
-        match serde_json::from_slice::<ApiError>(&body) {
-            Ok(error) => Err(Error::Api(error)),
-            Err(error) => Err(Error::Serialization(error)),
-        }
-    }
 }

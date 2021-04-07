@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use url::form_urlencoded::Serializer;
 
 use bytes::Bytes;

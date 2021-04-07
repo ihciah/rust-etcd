@@ -8,6 +8,7 @@ use http::{
     StatusCode, Uri,
 };
 use log::error;
+use rand::{prelude::SliceRandom, thread_rng};
 use reqwest::IntoUrl;
 use serde::de::DeserializeOwned;
 use serde_derive::{Deserialize, Serialize};
@@ -115,6 +116,14 @@ impl Client {
         self.request_on_each_endpoint("version").await
     }
 
+    fn shuffled_endpoints(&self) -> Vec<&Uri> {
+        // Shallow copy the endpoints, so we can shuffle them.
+        let mut endpoints: Vec<&Uri> = self.endpoints.iter().collect();
+        let mut rng = thread_rng();
+        endpoints.shuffle(&mut rng);
+        endpoints
+    }
+
     pub(crate) async fn first_ok<'a, H, F, T, E>(&'a self, handler: H) -> Result<T, Vec<E>>
     where
         F: Future<Output = Result<T, E>> + 'a,
@@ -122,8 +131,7 @@ impl Client {
     {
         let mut errors = Vec::new();
 
-        // JAKE-TODO: Randomly shuffle the endpoints.
-        for endpoint in self.endpoints.iter() {
+        for endpoint in self.shuffled_endpoints() {
             let result = (handler)(&self, endpoint).await;
             match result {
                 Ok(response) => return Ok(response),
@@ -289,6 +297,25 @@ impl<'a> From<&'a HeaderMap<HeaderValue>> for ClusterInfo {
             etcd_index,
             raft_index,
             raft_term,
+        }
+    }
+}
+
+pub(crate) async fn parse_empty_response(
+    response: reqwest::Response,
+) -> Result<Response<()>, Error> {
+    let status_code = response.status();
+    let cluster_info = ClusterInfo::from(response.headers());
+    let body = response.bytes().await?;
+    if status_code == StatusCode::NO_CONTENT {
+        Ok(Response {
+            data: (),
+            cluster_info,
+        })
+    } else {
+        match serde_json::from_slice::<ApiError>(&body) {
+            Ok(error) => Err(Error::Api(error)),
+            Err(error) => Err(Error::Serialization(error)),
         }
     }
 }
