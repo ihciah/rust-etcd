@@ -635,6 +635,10 @@ where
                 } else {
                     client.http_client().put(url)
                 };
+                let request = request.header(
+                    http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                );
                 let response = request.body(request_body).send().await?;
                 parse_etcd_response(response, |s| {
                     s == StatusCode::OK || s == StatusCode::CREATED

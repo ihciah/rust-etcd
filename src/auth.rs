@@ -420,7 +420,16 @@ pub async fn create_role(client: &Client, role: Role) -> EtcdAuthResult<Role> {
             let body = body.clone();
             let url = build_url(endpoint, &format!("/roles/{}", role.name));
             async move {
-                let response = client.http_client().put(url).body(body).send().await?;
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
                 parse_auth_response(response, |s| {
                     s == StatusCode::OK || s == StatusCode::CREATED
                 })
@@ -439,7 +448,16 @@ pub async fn create_user(client: &Client, user: NewUser) -> EtcdAuthResult<User>
             let url = build_url(endpoint, &format!("/users/{}", user.name));
             let body = body.clone();
             async move {
-                let response = client.http_client().put(url).body(body).send().await?;
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
                 parse_auth_response(response, |s| {
                     s == StatusCode::OK || s == StatusCode::CREATED
                 })
@@ -600,7 +618,16 @@ pub async fn update_role(client: &Client, role: RoleUpdate) -> EtcdAuthResult<Ro
             let url = build_url(endpoint, &format!("/roles/{}", role.name));
             let body = body.clone();
             async move {
-                let response = client.http_client().put(url).body(body).send().await?;
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
                 parse_auth_response(response, |s| s == StatusCode::OK).await
             }
         })
@@ -616,7 +643,16 @@ pub async fn update_user(client: &Client, user: UserUpdate) -> EtcdAuthResult<Us
             let url = build_url(endpoint, &format!("/users/{}", user.name));
             let body = body.clone();
             async move {
-                let response = client.http_client().put(url).body(body).send().await?;
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
                 parse_auth_response(response, |s| s == StatusCode::OK).await
             }
         })

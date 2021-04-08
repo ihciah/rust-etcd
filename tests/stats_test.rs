@@ -6,13 +6,13 @@ mod test;
 
 #[test]
 fn leader_stats() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
     client.run(|c| stats::leader_stats(&c)).unwrap();
 }
 
 #[test]
 fn self_stats() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
     let results = client.run(|c| stats::self_stats(&c));
     for result in results {
         result.unwrap();

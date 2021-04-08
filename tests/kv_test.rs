@@ -1,9 +1,7 @@
-use std::thread::{sleep, spawn};
 use std::time::Duration;
 
 use etcd::kv::{self, Action, GetOptions, KeyValueInfo, WatchError, WatchOptions};
-use etcd::{Error, Response};
-use tokio::sync::oneshot;
+use etcd::Error;
 
 use crate::test::TestClient;
 
@@ -11,7 +9,7 @@ mod test;
 
 #[test]
 fn create() {
-    let mut client = TestClient::new();
+    let client = TestClient::new();
 
     let response = client
         .run(|c| kv::create(c, "/test/foo", "bar", Some(60)))
@@ -25,7 +23,7 @@ fn create() {
 
 #[test]
 fn create_does_not_replace_existing_key() {
-    let mut client = TestClient::new();
+    let client = TestClient::new();
     client
         .run(|c| kv::create(c, "/test/foo", "bar", Some(60)))
         .unwrap();
@@ -48,8 +46,8 @@ fn create_does_not_replace_existing_key() {
 
 #[test]
 fn create_in_order() {
-    let mut client = TestClient::new();
-    let mut results: Result<Vec<_>, _> = (1..4)
+    let client = TestClient::new();
+    let results: Result<Vec<_>, _> = (1..4)
         .map(|_| client.run(|c| kv::create_in_order(c, "/test/foo", "bar", None)))
         .collect();
     let results = results.unwrap();
@@ -64,7 +62,7 @@ fn create_in_order() {
 
 #[test]
 fn create_in_order_must_operate_on_a_directory() {
-    let mut client = TestClient::new();
+    let client = TestClient::new();
     client
         .run(|c| kv::create(&c, "/test/foo", "bar", None))
         .unwrap();
@@ -394,7 +392,7 @@ fn update() {
 
 #[test]
 fn update_requires_existing_key() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
 
     match client.run(|c| kv::update(c, "/test/foo", "bar", None)) {
         Err(ref errors) => match errors[0] {
@@ -434,7 +432,7 @@ fn update_dir_replaces_key() {
 
 #[test]
 fn update_dir_requires_existing_dir() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
 
     let res = client.run(|c| kv::update_dir(c, "/test", None));
     assert!(res.is_err());

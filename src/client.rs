@@ -397,16 +397,15 @@ pub(crate) async fn parse_empty_response(
     let status_code = response.status();
     let cluster_info = ClusterInfo::from(response.headers());
     let body = response.bytes().await?;
-    if status_code == StatusCode::NO_CONTENT {
-        Ok(Response {
+    match status_code {
+        StatusCode::NO_CONTENT | StatusCode::OK => Ok(Response {
             data: (),
             cluster_info,
-        })
-    } else {
-        match serde_json::from_slice::<ApiError>(&body) {
+        }),
+        _ => match serde_json::from_slice::<ApiError>(&body) {
             Ok(error) => Err(Error::Api(error)),
             Err(error) => Err(Error::Serialization(error)),
-        }
+        },
     }
 }
 

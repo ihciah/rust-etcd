@@ -136,13 +136,18 @@ impl<'a> SetOptions<'a> {
         }
 
         let prev_exist = match self.prev_exist {
-            Some(prev_exist) => prev_exist,
-            None => false,
+            Some(prev_exist) => Some(prev_exist),
+            None => {
+                if self.refresh {
+                    Some(true)
+                } else {
+                    None
+                }
+            }
         };
 
         // If we are calling refresh, we should also ensure we are setting prevExist.
-        if prev_exist || self.refresh {
-            let prev_exist = prev_exist || self.refresh;
+        if let Some(prev_exist) = prev_exist {
             serializer.append_pair("prevExist", bool_to_str(prev_exist));
         }
 

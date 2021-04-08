@@ -4,7 +4,7 @@ mod test;
 
 #[test]
 fn health() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
     let responses = client.run(|c| c.health());
 
     for response in responses {
