@@ -6,7 +6,7 @@ mod test;
 
 #[test]
 fn list() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
     let res = client.run(|c| members::list(c)).unwrap();
     let members = res.data;
     let member = &members[0];

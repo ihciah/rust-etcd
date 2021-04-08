@@ -14,7 +14,7 @@ fn health() {
 
 #[test]
 fn versions() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
     let responses = client.run(|c| c.versions());
 
     for response in responses {

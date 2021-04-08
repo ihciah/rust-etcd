@@ -21,7 +21,7 @@ fn self_stats() {
 
 #[test]
 fn store_stats() {
-    let mut client = TestClient::no_destructor();
+    let client = TestClient::no_destructor();
     let results = client.run(|c| stats::store_stats(&c));
     for result in results {
         result.unwrap();

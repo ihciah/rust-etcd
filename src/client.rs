@@ -49,6 +49,11 @@ pub struct Health {
     pub health: String,
 }
 
+/// A client builder is used to configure and create a client.
+///
+/// Use with [`ClientBuilder::new`], however if you don't require advanced configuration,
+/// a client can be created with [`Client::new`].
+#[derive(Debug)]
 pub struct ClientBuilder {
     endpoints: Vec<Uri>,
     basic_auth: Option<BasicAuth>,

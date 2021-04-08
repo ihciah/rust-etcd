@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::Read;
-use std::ops::Deref;
 
 use etcd::{kv, Client, ClientBuilder};
 use futures::Future;
@@ -66,7 +65,7 @@ impl TestClient {
 
 impl TestClient {
     #[allow(dead_code)]
-    pub fn run<'a, F, U, R>(&'a mut self, func: F) -> R
+    pub fn run<'a, F, U, R>(&'a self, func: F) -> R
     where
         F: FnOnce(&'a Client) -> U,
         U: Future<Output = R> + 'a,
@@ -82,13 +81,5 @@ impl Drop for TestClient {
                 kv::delete(&self.client, "/test", true).await.ok();
             });
         }
-    }
-}
-
-impl Deref for TestClient {
-    type Target = Client;
-
-    fn deref(&self) -> &Self::Target {
-        &self.client
     }
 }

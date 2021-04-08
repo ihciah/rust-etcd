@@ -66,10 +66,10 @@ impl Display for Error {
         match *self {
             Error::Api(ref error) => write!(f, "{}", error),
             Error::Http(ref error) => write!(f, "{}", error),
-            ref error @ Error::InvalidConditions => write!(f, "{}", error.description()),
+            ref error @ Error::InvalidConditions => write!(f, "{}", error.to_string()),
             Error::InvalidUri(ref error) => write!(f, "{}", error),
             Error::InvalidUrl(ref error) => write!(f, "{}", error),
-            ref error @ Error::NoEndpoints => write!(f, "{}", error.description()),
+            ref error @ Error::NoEndpoints => write!(f, "{}", error.to_string()),
             Error::Serialization(ref error) => write!(f, "{}", error),
             Error::UnexpectedStatus(ref status) => write!(
                 f,
@@ -137,7 +137,7 @@ impl From<Elapsed> for WatchError {
 impl Display for WatchError {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), FmtError> {
         match *self {
-            WatchError::Timeout => write!(f, "{}", self.description()),
+            WatchError::Timeout => write!(f, "{}", self.to_string()),
             ref other => other.fmt(f),
         }
     }

@@ -8,7 +8,7 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json;
 
 use crate::client::{parse_empty_response, Client, ClusterInfo, Response};
-use crate::error::{ApiError, Error};
+use crate::error::Error;
 
 /// The structure returned by the `GET /v2/auth/enable` endpoint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -573,7 +573,7 @@ pub async fn get_users<N>(client: &Client) -> EtcdAuthResult<Vec<User>> {
 }
 
 /// Determines whether or not the auth system is enabled.
-pub async fn status<N>(client: &Client) -> EtcdAuthResult<bool> {
+pub async fn status(client: &Client) -> EtcdAuthResult<bool> {
     client
         .first_ok(|client, endpoint| {
             let url = build_url(endpoint, "/enable");
@@ -628,7 +628,7 @@ fn build_url(endpoint: &Uri, path: &str) -> String {
     format!("{}v2/auth{}", endpoint, path)
 }
 
-pub async fn parse_auth_response<T>(
+async fn parse_auth_response<T>(
     response: reqwest::Response,
     status_code_is_success: impl FnOnce(StatusCode) -> bool,
 ) -> Result<Response<T>, Error>

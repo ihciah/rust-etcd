@@ -3,8 +3,7 @@ use std::time::Duration;
 
 use etcd::kv::{self, Action, GetOptions, KeyValueInfo, WatchError, WatchOptions};
 use etcd::{Error, Response};
-use futures::future::{join_all, Future};
-use futures::sync::oneshot::channel;
+use tokio::sync::oneshot;
 
 use crate::test::TestClient;
 
@@ -14,726 +13,580 @@ mod test;
 fn create() {
     let mut client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", Some(60)).and_then(|res| {
-        let node = res.data.node;
+    let response = client
+        .run(|c| kv::create(c, "/test/foo", "bar", Some(60)))
+        .unwrap();
+    let node = response.data.node;
 
-        assert_eq!(res.data.action, Action::Create);
-        assert_eq!(node.value.unwrap(), "bar");
-        assert_eq!(node.ttl.unwrap(), 60);
-
-        Ok(())
-    });
-
-    client.run(work);
+    assert_eq!(response.data.action, Action::Create);
+    assert_eq!(node.value.unwrap(), "bar");
+    assert_eq!(node.ttl.unwrap(), 60);
 }
 
 #[test]
 fn create_does_not_replace_existing_key() {
     let mut client = TestClient::new();
-    let inner_client = client.clone();
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", Some(60)))
+        .unwrap();
 
-    let work = kv::create(&client, "/test/foo", "bar", Some(60)).and_then(move |_| {
-        kv::create(&inner_client, "/test/foo", "bar", Some(60)).then(|result| {
-            match result {
-                Ok(_) => panic!("expected EtcdError due to pre-existing key"),
-                Err(errors) => {
-                    for error in errors {
-                        match error {
-                            Error::Api(ref error) => {
-                                assert_eq!(error.message, "Key already exists")
-                            }
-                            _ => panic!("expected EtcdError due to pre-existing key"),
-                        }
+    let result = client.run(|c| kv::create(c, "/test/foo", "bar", Some(60)));
+    match result {
+        Ok(_) => panic!("expected EtcdError due to pre-existing key"),
+        Err(errors) => {
+            for error in errors {
+                match error {
+                    Error::Api(ref error) => {
+                        assert_eq!(error.message, "Key already exists")
                     }
+                    _ => panic!("expected EtcdError due to pre-existing key"),
                 }
             }
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+        }
+    }
 }
 
 #[test]
 fn create_in_order() {
     let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let mut results: Result<Vec<_>, _> = (1..4)
+        .map(|_| client.run(|c| kv::create_in_order(c, "/test/foo", "bar", None)))
+        .collect();
+    let results = results.unwrap();
+    let mut kvis: Vec<KeyValueInfo> = results.into_iter().map(|response| response.data).collect();
+    kvis.sort_by_key(|ref kvi| kvi.node.modified_index);
 
-    let requests =
-        (1..4).map(move |_| Box::new(kv::create_in_order(&inner_client, "/test/foo", "bar", None)));
+    let keys: Vec<String> = kvis.into_iter().map(|kvi| kvi.node.key.unwrap()).collect();
 
-    let work = join_all(requests).and_then(|res: Vec<Response<KeyValueInfo>>| {
-        let mut kvis: Vec<KeyValueInfo> = res.into_iter().map(|response| response.data).collect();
-        kvis.sort_by_key(|ref kvi| kvi.node.modified_index);
-
-        let keys: Vec<String> = kvis.into_iter().map(|kvi| kvi.node.key.unwrap()).collect();
-
-        assert!(keys[0] < keys[1]);
-        assert!(keys[1] < keys[2]);
-
-        Ok(())
-    });
-
-    client.run(work);
+    assert!(keys[0] < keys[1]);
+    assert!(keys[1] < keys[2]);
 }
 
 #[test]
 fn create_in_order_must_operate_on_a_directory() {
     let mut client = TestClient::new();
-    let inner_client = client.clone();
+    client
+        .run(|c| kv::create(&c, "/test/foo", "bar", None))
+        .unwrap();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::create_in_order(&inner_client, "/test/foo", "baz", None).then(|result| {
-            assert!(result.is_err());
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let result = client.run(|c| kv::create_in_order(c, "/test/foo", "baz", None));
+    assert!(result.is_err());
 }
 
 #[test]
 fn compare_and_delete() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
+    let res = client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
+    let index = res.data.node.modified_index;
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |res| {
-        let index = res.data.node.modified_index;
-
-        kv::compare_and_delete(&inner_client, "/test/foo", Some("bar"), index).and_then(|res| {
-            assert_eq!(res.data.action, Action::CompareAndDelete);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let res = client
+        .run(|c| kv::compare_and_delete(c, "/test/foo", Some("bar"), index))
+        .unwrap();
+    assert_eq!(res.data.action, Action::CompareAndDelete);
 }
 
 #[test]
 fn compare_and_delete_only_index() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
+    let res = client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
+    let index = res.data.node.modified_index;
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |res| {
-        let index = res.data.node.modified_index;
-
-        kv::compare_and_delete(&inner_client, "/test/foo", None, index).and_then(|res| {
-            assert_eq!(res.data.action, Action::CompareAndDelete);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let res = client
+        .run(|c| kv::compare_and_delete(c, "/test/foo", None, index))
+        .unwrap();
+    assert_eq!(res.data.action, Action::CompareAndDelete);
 }
 
 #[test]
 fn compare_and_delete_only_value() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::compare_and_delete(&inner_client, "/test/foo", Some("bar"), None).and_then(|res| {
-            assert_eq!(res.data.action, Action::CompareAndDelete);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let res = client
+        .run(|c| kv::compare_and_delete(c, "/test/foo", Some("bar"), None))
+        .unwrap();
+    assert_eq!(res.data.action, Action::CompareAndDelete);
 }
 
 #[test]
 fn compare_and_delete_requires_conditions() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::compare_and_delete(&inner_client, "/test/foo", None, None).then(|result| match result {
-            Ok(_) => panic!("expected Error::InvalidConditions"),
-            Err(errors) => {
-                if errors.len() == 1 {
-                    match errors[0] {
-                        Error::InvalidConditions => Ok(()),
-                        _ => panic!("expected Error::InvalidConditions"),
-                    }
-                } else {
-                    panic!("expected a single error: Error::InvalidConditions");
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
+
+    let result = client.run(|c| kv::compare_and_delete(c, "/test/foo", None, None));
+    match result {
+        Ok(_) => panic!("expected Error::InvalidConditions"),
+        Err(errors) => {
+            if errors.len() == 1 {
+                match errors[0] {
+                    Error::InvalidConditions => {}
+                    _ => panic!("expected Error::InvalidConditions"),
                 }
+            } else {
+                panic!("expected a single error: Error::InvalidConditions");
             }
-        })
-    });
-
-    client.run(work);
+        }
+    }
 }
 
 #[test]
 fn test_compare_and_swap() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |res| {
-        let index = res.data.node.modified_index;
+    let res = client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
+    let index = res.data.node.modified_index;
 
-        kv::compare_and_swap(
-            &inner_client,
-            "/test/foo",
-            "baz",
-            Some(100),
-            Some("bar"),
-            index,
-        )
-        .and_then(|res| {
-            assert_eq!(res.data.action, Action::CompareAndSwap);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let res = client
+        .run(|c| kv::compare_and_swap(c, "/test/foo", "baz", Some(100), Some("bar"), index))
+        .unwrap();
+    assert_eq!(res.data.action, Action::CompareAndSwap);
 }
 
 #[test]
 fn compare_and_swap_only_index() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |res| {
-        let index = res.data.node.modified_index;
+    let res = client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
+    let index = res.data.node.modified_index;
 
-        kv::compare_and_swap(&inner_client, "/test/foo", "baz", None, None, index).and_then(|res| {
-            assert_eq!(res.data.action, Action::CompareAndSwap);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let res = client
+        .run(|c| kv::compare_and_swap(c, "/test/foo", "baz", None, None, index))
+        .unwrap();
+    assert_eq!(res.data.action, Action::CompareAndSwap);
 }
 
 #[test]
 fn compare_and_swap() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::compare_and_swap(&inner_client, "/test/foo", "baz", None, Some("bar"), None).and_then(
-            |res| {
-                assert_eq!(res.data.action, Action::CompareAndSwap);
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
 
-                Ok(())
-            },
-        )
-    });
-
-    client.run(work);
+    let res = client
+        .run(|c| kv::compare_and_swap(c, "/test/foo", "baz", None, Some("bar"), None))
+        .unwrap();
+    assert_eq!(res.data.action, Action::CompareAndSwap);
 }
 
 #[test]
 fn compare_and_swap_requires_conditions() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::compare_and_swap(&inner_client, "/test/foo", "baz", None, None, None).then(|result| {
-            match result {
-                Ok(_) => panic!("expected Error::InvalidConditions"),
-                Err(errors) => {
-                    if errors.len() == 1 {
-                        match errors[0] {
-                            Error::InvalidConditions => Ok(()),
-                            _ => panic!("expected Error::InvalidConditions"),
-                        }
-                    } else {
-                        panic!("expected a single error: Error::InvalidConditions");
-                    }
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
+
+    let result = client.run(|c| kv::compare_and_swap(c, "/test/foo", "baz", None, None, None));
+    match result {
+        Ok(_) => panic!("expected Error::InvalidConditions"),
+        Err(errors) => {
+            if errors.len() == 1 {
+                match errors[0] {
+                    Error::InvalidConditions => {}
+                    _ => panic!("expected Error::InvalidConditions"),
                 }
+            } else {
+                panic!("expected a single error: Error::InvalidConditions");
             }
-        })
-    });
-
-    client.run(work);
+        }
+    }
 }
 
 #[test]
 fn get() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", Some(60)).and_then(move |_| {
-        kv::get(&inner_client, "/test/foo", GetOptions::default()).and_then(|res| {
-            assert_eq!(res.data.action, Action::Get);
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", Some(60)))
+        .unwrap();
 
-            let node = res.data.node;
+    let res = client
+        .run(|c| kv::get(c, "/test/foo", GetOptions::default()))
+        .unwrap();
+    assert_eq!(res.data.action, Action::Get);
 
-            assert_eq!(node.value.unwrap(), "bar");
-            assert_eq!(node.ttl.unwrap(), 60);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let node = res.data.node;
+    assert_eq!(node.value.unwrap(), "bar");
+    assert_eq!(node.ttl.unwrap(), 60);
 }
 
 #[test]
 fn get_non_recursive() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = join_all(vec![
-        kv::set(&client, "/test/dir/baz", "blah", None),
-        kv::set(&client, "/test/foo", "bar", None),
-    ])
-    .and_then(move |_| {
-        kv::get(
-            &inner_client,
-            "/test",
-            GetOptions {
-                sort: true,
-                ..Default::default()
-            },
-        )
-        .and_then(|res| {
-            let node = res.data.node;
+    client
+        .run(|c| kv::set(c, "/test/dir/baz", "blah", None))
+        .unwrap();
+    client
+        .run(|c| kv::set(c, "/test/foo", "bar", None))
+        .unwrap();
 
-            assert_eq!(node.dir.unwrap(), true);
-
-            let nodes = node.nodes.unwrap();
-
-            assert_eq!(nodes[0].clone().key.unwrap(), "/test/dir");
-            assert_eq!(nodes[0].clone().dir.unwrap(), true);
-            assert_eq!(nodes[1].clone().key.unwrap(), "/test/foo");
-            assert_eq!(nodes[1].clone().value.unwrap(), "bar");
-
-            Ok(())
+    let res = client
+        .run(|c| {
+            kv::get(
+                c,
+                "/test",
+                GetOptions {
+                    sort: true,
+                    ..Default::default()
+                },
+            )
         })
-    });
+        .unwrap();
 
-    client.run(work);
+    let node = res.data.node;
+    assert_eq!(node.dir.unwrap(), true);
+
+    let nodes = node.nodes.unwrap();
+    assert_eq!(nodes[0].clone().key.unwrap(), "/test/dir");
+    assert_eq!(nodes[0].clone().dir.unwrap(), true);
+    assert_eq!(nodes[1].clone().key.unwrap(), "/test/foo");
+    assert_eq!(nodes[1].clone().value.unwrap(), "bar");
 }
 
 #[test]
 fn get_recursive() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::set(&client, "/test/dir/baz", "blah", None).and_then(move |_| {
-        kv::get(
-            &inner_client,
-            "/test",
-            GetOptions {
-                recursive: true,
-                sort: true,
-                ..Default::default()
-            },
-        )
-        .and_then(|res| {
-            let nodes = res.data.node.nodes.unwrap();
+    client
+        .run(|c| kv::set(c, "/test/dir/baz", "blah", None))
+        .unwrap();
 
-            assert_eq!(
-                nodes[0].clone().nodes.unwrap()[0].clone().value.unwrap(),
-                "blah"
-            );
-
-            Ok(())
+    let res = client
+        .run(|c| {
+            kv::get(
+                c,
+                "/test",
+                GetOptions {
+                    recursive: true,
+                    sort: true,
+                    ..Default::default()
+                },
+            )
         })
-    });
+        .unwrap();
+    let nodes = res.data.node.nodes.unwrap();
 
-    client.run(work);
+    assert_eq!(
+        nodes[0].clone().nodes.unwrap()[0].clone().value.unwrap(),
+        "blah"
+    );
 }
 
 #[test]
 fn get_root() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", Some(60)).and_then(move |_| {
-        kv::get(&inner_client, "/", GetOptions::default()).and_then(|res| {
-            assert_eq!(res.data.action, Action::Get);
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", Some(60)))
+        .unwrap();
 
-            let node = res.data.node;
+    let res = client
+        .run(|c| kv::get(c, "/", GetOptions::default()))
+        .unwrap();
+    assert_eq!(res.data.action, Action::Get);
 
-            assert!(node.created_index.is_none());
-            assert!(node.modified_index.is_none());
-            assert_eq!(node.nodes.unwrap().len(), 1);
-            assert_eq!(node.dir.unwrap(), true);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let node = res.data.node;
+    assert!(node.created_index.is_none());
+    assert!(node.modified_index.is_none());
+    assert_eq!(node.nodes.unwrap().len(), 1);
+    assert_eq!(node.dir.unwrap(), true);
 }
 
 #[test]
 fn https() {
-    let mut client = TestClient::https(true);
+    let client = TestClient::https(true);
 
-    let work = kv::set(&client, "/test/foo", "bar", Some(60));
-
-    client.run(work);
+    client
+        .run(|c| kv::set(c, "/test/foo", "bar", Some(60)))
+        .unwrap();
 }
 
 #[test]
 fn https_without_valid_client_certificate() {
-    let mut client = TestClient::https(false);
-
-    let work: Box<dyn Future<Item = (), Error = ()> + Send> =
-        Box::new(kv::set(&client, "/test/foo", "bar", Some(60)).then(|res| {
-            assert!(res.is_err());
-
-            Ok(())
-        }));
-
-    client.run(work);
+    let client = TestClient::https(false);
+    let res = client.run(|c| kv::set(c, "/test/foo", "bar", Some(60)));
+    assert!(res.is_err());
 }
 
 #[test]
 fn set() {
-    let mut client = TestClient::new();
+    let client = TestClient::new();
 
-    let work = kv::set(&client, "/test/foo", "baz", None).and_then(|res| {
-        assert_eq!(res.data.action, Action::Set);
+    let res = client
+        .run(|c| kv::set(c, "/test/foo", "baz", None))
+        .unwrap();
+    assert_eq!(res.data.action, Action::Set);
 
-        let node = res.data.node;
-
-        assert_eq!(node.value.unwrap(), "baz");
-        assert!(node.ttl.is_none());
-
-        Ok(())
-    });
-
-    client.run(work);
+    let node = res.data.node;
+    assert_eq!(node.value.unwrap(), "baz");
+    assert!(node.ttl.is_none());
 }
 
 #[test]
 fn set_and_refresh() {
-    let mut client = TestClient::new();
+    let client = TestClient::new();
 
-    let work = kv::set(&client, "/test/foo", "baz", Some(30)).and_then(|res| {
-        assert_eq!(res.data.action, Action::Set);
+    let res = client
+        .run(|c| kv::set(c, "/test/foo", "baz", Some(30)))
+        .unwrap();
+    assert_eq!(res.data.action, Action::Set);
 
-        let node = res.data.node;
+    let node = res.data.node;
+    assert_eq!(node.value.unwrap(), "baz");
+    assert!(node.ttl.is_some());
 
-        assert_eq!(node.value.unwrap(), "baz");
-        assert!(node.ttl.is_some());
+    let res = client.run(|c| kv::refresh(c, "/test/foo", 30)).unwrap();
+    assert_eq!(res.data.action, Action::Update);
 
-        Ok(())
-    });
-
-    client.run(work);
-
-    let work = kv::refresh(&client, "/test/foo", 30).and_then(|res| {
-        assert_eq!(res.data.action, Action::Update);
-
-        let node = res.data.node;
-
-        assert_eq!(node.value.unwrap(), "baz");
-        assert!(node.ttl.is_some());
-
-        Ok(())
-    });
-
-    client.run(work);
+    let node = res.data.node;
+    assert_eq!(node.value.unwrap(), "baz");
+    assert!(node.ttl.is_some());
 }
 
 #[test]
 fn set_dir() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::set_dir(&client, "/test", None).and_then(move |_| {
-        kv::set_dir(&inner_client, "/test", None)
-            .then(|result| match result {
-                Ok(_) => panic!("set_dir should fail on an existing dir"),
-                Err(_) => Ok(()),
-            })
-            .and_then(move |_| {
-                kv::set(&inner_client, "/test/foo", "bar", None)
-                    .and_then(move |_| kv::set_dir(&inner_client, "/test/foo", None))
-            })
-    });
+    client.run(|c| kv::set_dir(c, "/test", None)).unwrap();
+    match client.run(|c| kv::set_dir(c, "/test", None)) {
+        Ok(_) => panic!("set_dir should fail on an existing dir"),
+        Err(_) => {}
+    }
 
-    client.run(work);
+    client
+        .run(|c| kv::set(c, "/test/foo", "bar", None))
+        .unwrap();
+    client.run(|c| kv::set_dir(c, "/test/foo", None)).unwrap();
 }
 
 #[test]
 fn update() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::update(&inner_client, "/test/foo", "blah", Some(30)).and_then(|res| {
-            assert_eq!(res.data.action, Action::Update);
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
 
-            let node = res.data.node;
+    let res = client
+        .run(|c| kv::update(c, "/test/foo", "blah", Some(30)))
+        .unwrap();
+    assert_eq!(res.data.action, Action::Update);
 
-            assert_eq!(node.value.unwrap(), "blah");
-            assert_eq!(node.ttl.unwrap(), 30);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let node = res.data.node;
+    assert_eq!(node.value.unwrap(), "blah");
+    assert_eq!(node.ttl.unwrap(), 30);
 }
 
 #[test]
 fn update_requires_existing_key() {
     let mut client = TestClient::no_destructor();
 
-    let work = kv::update(&client, "/test/foo", "bar", None).then(|result| {
-        match result {
-            Err(ref errors) => match errors[0] {
-                Error::Api(ref error) => assert_eq!(error.message, "Key not found"),
-                _ => panic!("expected EtcdError due to missing key"),
-            },
+    match client.run(|c| kv::update(c, "/test/foo", "bar", None)) {
+        Err(ref errors) => match errors[0] {
+            Error::Api(ref error) => assert_eq!(error.message, "Key not found"),
             _ => panic!("expected EtcdError due to missing key"),
-        }
-
-        let result: Result<(), ()> = Ok(());
-
-        result
-    });
-
-    client.run(work);
+        },
+        _ => panic!("expected EtcdError due to missing key"),
+    }
 }
 
 #[test]
 fn update_dir() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create_dir(&client, "/test", None).and_then(move |_| {
-        kv::update_dir(&inner_client, "/test", Some(60)).and_then(|res| {
-            assert_eq!(res.data.node.ttl.unwrap(), 60);
+    client.run(|c| kv::create_dir(c, "/test", None)).unwrap();
 
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let res = client
+        .run(|c| kv::update_dir(c, "/test", Some(60)))
+        .unwrap();
+    assert_eq!(res.data.node.ttl.unwrap(), 60);
 }
 
 #[test]
 fn update_dir_replaces_key() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
+    client
+        .run(|c| kv::set(c, "/test/foo", "bar", None))
+        .unwrap();
+    let res = client
+        .run(|c| kv::update_dir(c, "/test/foo", Some(60)))
+        .unwrap();
 
-    let work = kv::set(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::update_dir(&inner_client, "/test/foo", Some(60)).and_then(|res| {
-            let node = res.data.node;
-
-            assert_eq!(node.value.unwrap(), "");
-            assert_eq!(node.ttl.unwrap(), 60);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let node = res.data.node;
+    assert_eq!(node.value.unwrap(), "");
+    assert_eq!(node.ttl.unwrap(), 60);
 }
 
 #[test]
 fn update_dir_requires_existing_dir() {
     let mut client = TestClient::no_destructor();
 
-    let work: Box<dyn Future<Item = (), Error = ()> + Send> =
-        Box::new(kv::update_dir(&client, "/test", None).then(|res| {
-            assert!(res.is_err());
-
-            Ok(())
-        }));
-
-    client.run(work);
+    let res = client.run(|c| kv::update_dir(c, "/test", None));
+    assert!(res.is_err());
 }
 
 #[test]
 fn delete() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
 
-    let work = kv::create(&client, "/test/foo", "bar", None).and_then(move |_| {
-        kv::delete(&inner_client, "/test/foo", false).and_then(|res| {
-            assert_eq!(res.data.action, Action::Delete);
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
 
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let res = client.run(|c| kv::delete(c, "/test/foo", false)).unwrap();
+    assert_eq!(res.data.action, Action::Delete);
 }
 
 #[test]
 fn create_dir() {
-    let mut client = TestClient::new();
+    let client = TestClient::new();
 
-    let work = kv::create_dir(&client, "/test/dir", None).and_then(|res| {
-        assert_eq!(res.data.action, Action::Create);
+    let res = client
+        .run(|c| kv::create_dir(c, "/test/dir", None))
+        .unwrap();
+    assert_eq!(res.data.action, Action::Create);
 
-        let node = res.data.node;
-
-        assert!(node.dir.is_some());
-        assert!(node.value.is_none());
-
-        Ok(())
-    });
-
-    client.run(work);
+    let node = res.data.node;
+    assert!(node.dir.is_some());
+    assert!(node.value.is_none());
 }
 
 #[test]
 fn delete_dir() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
-
-    let work = kv::create_dir(&client, "/test/dir", None).and_then(move |_| {
-        kv::delete_dir(&inner_client, "/test/dir").and_then(|res| {
-            assert_eq!(res.data.action, Action::Delete);
-
-            Ok(())
-        })
-    });
-
-    client.run(work);
+    let client = TestClient::new();
+    client
+        .run(|c| kv::create_dir(c, "/test/dir", None))
+        .unwrap();
+    let res = client.run(|c| kv::delete_dir(c, "/test/dir")).unwrap();
+    assert_eq!(res.data.action, Action::Delete);
 }
 
 #[test]
 fn watch() {
-    let (tx, rx) = channel();
+    let client = TestClient::new();
+    let create_response = client
+        .run(|c| kv::create(&c, "/test/foo", "bar", None))
+        .unwrap();
+    let set_response = client
+        .run(|c| kv::set(c, "/test/foo", "baz", None))
+        .unwrap();
+    let watch_response = client
+        .run(|c| {
+            kv::watch(
+                c,
+                "/test/foo",
+                WatchOptions {
+                    index: Some(create_response.data.node.created_index.unwrap() + 1),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
 
-    let child = spawn(move || {
-        let mut client = TestClient::no_destructor();
-        let inner_client = client.clone();
-
-        let work = rx.then(move |_| kv::set(&inner_client, "/test/foo", "baz", None));
-
-        client.run(work);
-    });
-
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
-
-    let work = kv::create(&client, "/test/foo", "bar", None)
-        .map_err(|errors| WatchError::Other(errors))
-        .and_then(move |_| {
-            tx.send(()).unwrap();
-
-            kv::watch(&inner_client, "/test/foo", WatchOptions::default()).and_then(|res| {
-                assert_eq!(res.data.node.value.unwrap(), "baz");
-
-                Ok(())
-            })
-        });
-
-    client.run(work);
-
-    child.join().ok().unwrap();
+    assert_eq!(watch_response.data.node.value.unwrap(), "baz");
+    assert_eq!(
+        watch_response.data.node.modified_index.unwrap(),
+        set_response.data.node.modified_index.unwrap()
+    );
 }
 
 #[test]
 fn watch_cancel() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
+    let client = TestClient::new();
+    client
+        .run(|c| kv::create(c, "/test/foo", "bar", None))
+        .unwrap();
 
-    let work: Box<dyn Future<Item = (), Error = ()> + Send> = Box::new(
-        kv::create(&client, "/test/foo", "bar", None)
-            .map_err(|errors| WatchError::Other(errors))
-            .and_then(move |_| {
-                kv::watch(
-                    &inner_client,
-                    "/test/foo",
-                    WatchOptions {
-                        timeout: Some(Duration::from_millis(1)),
-                        ..Default::default()
-                    },
-                )
-            })
-            .then(|res| match res {
-                Ok(_) => panic!("expected WatchError::Timeout"),
-                Err(WatchError::Timeout) => Ok(()),
-                Err(_) => panic!("expected WatchError::Timeout"),
-            }),
-    );
+    let res = client.run(|c| {
+        kv::watch(
+            c,
+            "/test/foo",
+            WatchOptions {
+                timeout: Some(Duration::from_millis(1)),
+                ..Default::default()
+            },
+        )
+    });
 
-    client.run(work);
+    match res {
+        Err(WatchError::Timeout) => {}
+        _ => panic!("expected WatchError::Timeout"),
+    }
 }
 
 #[test]
 fn watch_index() {
-    let mut client = TestClient::new();
-    let inner_client = client.clone();
-
-    let work = kv::set(&client, "/test/foo", "bar", None)
-        .map_err(|errors| WatchError::Other(errors))
-        .and_then(move |res| {
-            let index = res.data.node.modified_index;
-
+    let client = TestClient::new();
+    let res = client
+        .run(|c| kv::set(c, "/test/foo", "bar", None))
+        .unwrap();
+    let index = res.data.node.modified_index;
+    let res = client
+        .run(|c| {
             kv::watch(
-                &inner_client,
+                c,
                 "/test/foo",
                 WatchOptions {
-                    index: index,
+                    index,
                     ..Default::default()
                 },
             )
-            .and_then(move |res| {
-                let node = res.data.node;
+        })
+        .unwrap();
+    let node = res.data.node;
 
-                assert_eq!(node.modified_index, index);
-                assert_eq!(node.value.unwrap(), "bar");
-
-                Ok(())
-            })
-        });
-
-    client.run(work);
+    assert_eq!(node.modified_index, index);
+    assert_eq!(node.value.unwrap(), "bar");
 }
 
 #[test]
 fn watch_recursive() {
-    let (tx, rx) = channel();
+    let client = TestClient::new();
 
-    let child = spawn(move || {
-        let mut client = TestClient::no_destructor();
-        let inner_client = client.clone();
+    let watch_result = client
+        .run(|c| async move {
+            let task_c = c.clone();
+            let set_handle = tokio::task::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                kv::set(&task_c, "/test/foo/bar", "baz", None)
+                    .await
+                    .unwrap();
+            });
 
-        let work = rx.then(move |_| {
-            let duration = Duration::from_millis(100);
-            sleep(duration);
-            kv::set(&inner_client, "/test/foo/bar", "baz", None)
-        });
+            let watch_result = kv::watch(
+                c,
+                "/test",
+                WatchOptions {
+                    recursive: true,
+                    timeout: Some(Duration::from_millis(1000)),
+                    ..Default::default()
+                },
+            )
+            .await;
 
-        client.run(work);
-    });
+            // Ensure the set has run, and has not panicked.
+            set_handle.await.unwrap();
 
-    let mut client = TestClient::new();
+            watch_result
+        })
+        .unwrap();
 
-    tx.send(()).unwrap();
-
-    let work = kv::watch(
-        &client,
-        "/test",
-        WatchOptions {
-            recursive: true,
-            timeout: Some(Duration::from_millis(1000)),
-            ..Default::default()
-        },
-    )
-    .and_then(|res| {
-        let node = res.data.node;
-
-        assert_eq!(node.key.unwrap(), "/test/foo/bar");
-        assert_eq!(node.value.unwrap(), "baz");
-
-        Ok(())
-    });
-
-    client.run(work);
-
-    child.join().ok().unwrap();
+    let node = watch_result.data.node;
+    assert_eq!(node.key.unwrap(), "/test/foo/bar");
+    assert_eq!(node.value.unwrap(), "baz");
 }

@@ -1,12 +1,8 @@
-use etcd::Client;
+use crate::test::TestClient;
 use etcd::{
     auth::{self, AuthChange, NewUser, Role, RoleUpdate, UserUpdate},
     ClientBuilder,
 };
-use futures::future::Future;
-use tokio::runtime::Runtime;
-
-use crate::test::TestClient;
 
 mod test;
 
