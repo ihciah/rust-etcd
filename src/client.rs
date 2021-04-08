@@ -1,8 +1,7 @@
 //! Contains the etcd client. All API calls are made via the client.
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
-use futures::Future;
 use http::{
     header::{HeaderMap, HeaderValue},
     StatusCode, Uri,

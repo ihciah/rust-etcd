@@ -1,8 +1,7 @@
-use std::fs::File;
 use std::io::Read;
+use std::{fs::File, future::Future};
 
 use etcd::{kv, Client, ClientBuilder};
-use futures::Future;
 use reqwest::{Certificate, Identity};
 use tokio::runtime::Runtime;
 
