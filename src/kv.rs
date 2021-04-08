@@ -4,26 +4,21 @@
 //! of key-value pairs. For example, "/foo" is a key if it has a value, but it is a directory if
 //! there other other key-value pairs "underneath" it, such as "/foo/bar".
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use hyper::client::connect::Connect;
-use hyper::{StatusCode, Uri};
+use http::{StatusCode, Uri};
 use serde_derive::{Deserialize, Serialize};
-use serde_json;
-use std::future::Future;
 use tokio::time::timeout;
-use url::Url;
 
 pub use crate::error::WatchError;
 
-use crate::client::{Client, ClusterInfo, Response};
-use crate::error::{ApiError, Error};
-use crate::first_ok::{first_ok, Result};
+use crate::client::{parse_etcd_response, Client, Response};
+use crate::error::Error;
 use crate::options::{
     ComparisonConditions, DeleteOptions, GetOptions as InternalGetOptions, SetOptions,
 };
-use url::form_urlencoded::Serializer;
+
+type EtcdKeyValueResult<E = Vec<Error>> = Result<Response<KeyValueInfo>, E>;
 
 /// Information about the result of a successful key-value API operation.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -132,14 +127,14 @@ pub struct WatchOptions {
 /// # Errors
 ///
 /// Fails if the conditions didn't match or if no conditions were given.
-pub fn compare_and_delete<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    current_value: Option<&'a str>,
+pub async fn compare_and_delete<K>(
+    client: &Client,
+    key: K,
+    current_value: Option<&str>,
     current_modified_index: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_delete(
         client,
@@ -152,6 +147,7 @@ where
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Updates a node only if the given current value and/or current modified index
@@ -171,17 +167,20 @@ where
 /// # Errors
 ///
 /// Fails if the conditions didn't match or if no conditions were given.
-pub fn compare_and_swap<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    value: &'a str,
+pub async fn compare_and_swap<K, V>(
+    client: &Client,
+    key: K,
+    value: V,
     ttl: Option<u64>,
-    current_value: Option<&'a str>,
+    current_value: Option<&str>,
     current_modified_index: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
+    V: AsRef<str>,
 {
+    let value = value.as_ref();
+
     raw_set(
         client,
         key,
@@ -190,11 +189,12 @@ where
                 value: current_value,
                 modified_index: current_modified_index,
             }),
-            ttl: ttl,
+            ttl,
             value: Some(value),
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Creates a new key-value pair.
@@ -209,25 +209,24 @@ where
 /// # Errors
 ///
 /// Fails if the key already exists.
-pub fn create<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    value: &'a str,
-    ttl: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn create<K, V>(client: &Client, key: K, value: V, ttl: Option<u64>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
+    V: AsRef<str>,
 {
+    let value = value.as_ref();
+
     raw_set(
         client,
         key,
         SetOptions {
             prev_exist: Some(false),
-            ttl: ttl,
+            ttl,
             value: Some(value),
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Creates a new empty directory.
@@ -241,13 +240,9 @@ where
 /// # Errors
 ///
 /// Fails if the key already exists.
-pub fn create_dir<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    ttl: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn create_dir<K>(client: &Client, key: K, ttl: Option<u64>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_set(
         client,
@@ -259,6 +254,7 @@ where
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Creates a new key-value pair in a directory with a numeric key name larger than any of its
@@ -280,15 +276,17 @@ where
 /// # Errors
 ///
 /// Fails if the key already exists and is not a directory.
-pub fn create_in_order<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    value: &'a str,
+pub async fn create_in_order<K, V>(
+    client: &Client,
+    key: K,
+    value: V,
     ttl: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
+    V: AsRef<str>,
 {
+    let value = value.as_ref();
     raw_set(
         client,
         key,
@@ -299,6 +297,7 @@ where
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Deletes a node.
@@ -313,13 +312,9 @@ where
 /// # Errors
 ///
 /// Fails if the key is a directory and `recursive` is `false`.
-pub fn delete<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    recursive: bool,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn delete<K>(client: &Client, key: K, recursive: bool) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_delete(
         client,
@@ -329,6 +324,7 @@ where
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Deletes an empty directory or a key-value pair at the given key.
@@ -341,12 +337,9 @@ where
 /// # Errors
 ///
 /// Fails if the directory is not empty.
-pub fn delete_dir<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn delete_dir<K>(client: &Client, key: K) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_delete(
         client,
@@ -356,6 +349,7 @@ where
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Gets the value of a node.
@@ -369,13 +363,9 @@ where
 /// # Errors
 ///
 /// Fails if the key doesn't exist.
-pub fn get<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    options: GetOptions,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn get<K>(client: &Client, key: K, options: GetOptions) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_get(
         client,
@@ -387,6 +377,7 @@ where
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Sets the value of a key-value pair.
@@ -403,24 +394,22 @@ where
 /// # Errors
 ///
 /// Fails if the node is a directory.
-pub fn set<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    value: &'a str,
-    ttl: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn set<K, V>(client: &Client, key: K, value: V, ttl: Option<u64>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
+    V: AsRef<str>,
 {
+    let value = value.as_ref();
     raw_set(
         client,
         key,
         SetOptions {
-            ttl: ttl,
+            ttl,
             value: Some(value),
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Refreshes the already set etcd key, bumping its TTL without triggering watcher updates.
@@ -434,13 +423,9 @@ where
 /// # Errors
 ///
 /// Fails if the node does not exist.
-pub fn refresh<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    ttl: u64,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn refresh<K>(client: &Client, key: K, ttl: u64) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_set(
         client,
@@ -452,6 +437,7 @@ where
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Sets the key to an empty directory.
@@ -467,23 +453,20 @@ where
 /// # Errors
 ///
 /// Fails if the node is an existing directory.
-pub fn set_dir<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    ttl: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn set_dir<K>(client: &Client, key: K, ttl: Option<u64>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_set(
         client,
         key,
         SetOptions {
             dir: Some(true),
-            ttl: ttl,
+            ttl,
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Updates an existing key-value pair.
@@ -498,25 +481,23 @@ where
 /// # Errors
 ///
 /// Fails if the key does not exist.
-pub fn update<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    value: &'a str,
-    ttl: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn update<K, V>(client: &Client, key: K, value: V, ttl: Option<u64>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
+    V: AsRef<str>,
 {
+    let value = value.as_ref();
     raw_set(
         client,
         key,
         SetOptions {
             prev_exist: Some(true),
-            ttl: ttl,
+            ttl,
             value: Some(value),
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Updates a directory.
@@ -533,13 +514,9 @@ where
 /// # Errors
 ///
 /// Fails if the node does not exist.
-pub fn update_dir<'a, C>(
-    client: &'a Client<C>,
-    key: &'a str,
-    ttl: Option<u64>,
-) -> impl Future<Output = Result<KeyValueInfo>> + 'a
+pub async fn update_dir<K>(client: &Client, key: K, ttl: Option<u64>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
     raw_set(
         client,
@@ -547,10 +524,11 @@ where
         SetOptions {
             dir: Some(true),
             prev_exist: Some(true),
-            ttl: ttl,
+            ttl,
             ..Default::default()
         },
     )
+    .await
 }
 
 /// Watches a node for changes and returns the new value as soon as a change takes place.
@@ -570,15 +548,15 @@ where
 ///
 /// Fails if a timeout is specified and the duration lapses without a response from the etcd
 /// cluster.
-pub async fn watch<C>(
-    client: &Client<C>,
-    key: &str,
+pub async fn watch<K>(
+    client: &Client,
+    key: K,
     options: WatchOptions,
-) -> std::result::Result<Response<KeyValueInfo>, WatchError>
+) -> EtcdKeyValueResult<WatchError>
 where
-    C: Clone + Connect + Sync + Send + 'static,
+    K: AsRef<str>,
 {
-    let work = raw_get(
+    let fut = raw_get(
         client,
         key,
         InternalGetOptions {
@@ -590,238 +568,92 @@ where
     );
 
     if let Some(duration) = options.timeout {
-        match timeout(duration.into(), work).await {
-            Ok(res) => res.map_err(WatchError::Other),
-            Err(_) => Err(WatchError::Timeout),
+        match timeout(duration, fut).await {
+            Ok(result) => result.map_err(WatchError::Other),
+            Err(_elapsed) => Err(WatchError::Timeout),
         }
     } else {
-        work.await.map_err(WatchError::Other)
+        fut.await.map_err(WatchError::Other)
     }
-}
-
-/// Constructs the full URL for an API call.
-fn build_uri(endpoint: &Uri, path: &str) -> std::result::Result<Uri, http::uri::InvalidUri> {
-    format!("{}v2/keys{}", endpoint, path).parse()
 }
 
 /// Handles all delete operations.
-async fn raw_delete<C>(
-    client: &Client<C>,
-    key: &str,
-    options: DeleteOptions<'_>,
-) -> Result<KeyValueInfo>
+async fn raw_delete<K>(client: &Client, key: K, options: DeleteOptions<'_>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Sync + Send + 'static,
+    K: AsRef<str>,
 {
-    let mut query_pairs = HashMap::new();
+    let key = key.as_ref();
+    let query_params = options.into_query_params().map_err(|e| vec![e])?;
 
-    if options.recursive.is_some() {
-        query_pairs.insert("recursive", format!("{}", options.recursive.unwrap()));
-    }
-
-    if options.dir.is_some() {
-        query_pairs.insert("dir", format!("{}", options.dir.unwrap()));
-    }
-
-    if options.conditions.is_some() {
-        let conditions = options.conditions.unwrap();
-
-        if conditions.is_empty() {
-            return Err(vec![Error::InvalidConditions]);
-        }
-
-        if conditions.modified_index.is_some() {
-            query_pairs.insert(
-                "prevIndex",
-                format!("{}", conditions.modified_index.unwrap()),
-            );
-        }
-
-        if conditions.value.is_some() {
-            query_pairs.insert("prevValue", conditions.value.unwrap().to_owned());
-        }
-    }
-
-    let http_client = client.http_client().clone();
-    let key = key.to_string();
-
-    first_ok(client.endpoints().to_vec(), move |endpoint| {
-        let http_client = http_client.clone();
-        let query_pairs = query_pairs.clone();
-        let key = key.clone();
-        async move {
-            let url =
-                Url::parse_with_params(&build_uri(&endpoint, &key)?.to_string(), query_pairs)?;
-            let uri = url.to_string().parse()?;
-            let response = http_client.delete(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<KeyValueInfo>(&body) {
-                    Ok(data) => Ok(Response { data, cluster_info }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                match serde_json::from_slice::<ApiError>(&body) {
-                    Ok(error) => Err(Error::Api(error)),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
+    client
+        .first_ok(move |client, endpoint| {
+            let url = build_url(endpoint, key, Some(&query_params));
+            async move {
+                let response = client.http_client().delete(url).send().await?;
+                parse_etcd_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
-    .await
+        })
+        .await
 }
 
 /// Handles all get operations.
-async fn raw_get<C>(
-    client: &Client<C>,
-    key: &str,
-    options: InternalGetOptions,
-) -> Result<KeyValueInfo>
+async fn raw_get<K>(client: &Client, key: K, options: InternalGetOptions) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
-    let mut query_pairs = HashMap::new();
+    let query_params = options.into_query_params();
+    let key = key.as_ref();
 
-    query_pairs.insert("recursive", format!("{}", options.recursive));
-
-    if options.sort.is_some() {
-        query_pairs.insert("sorted", format!("{}", options.sort.unwrap()));
-    }
-
-    if options.wait {
-        query_pairs.insert("wait", "true".to_owned());
-    }
-
-    if options.wait_index.is_some() {
-        query_pairs.insert("waitIndex", format!("{}", options.wait_index.unwrap()));
-    }
-
-    let http_client = client.http_client().clone();
-    let key = key.to_string();
-
-    first_ok(client.endpoints().to_vec(), move |endpoint| {
-        let http_client = http_client.clone();
-        let key = key.clone();
-        let query_pairs = query_pairs.clone();
-
-        async move {
-            let url =
-                Url::parse_with_params(&build_uri(&endpoint, &key)?.to_string(), query_pairs)?;
-            let uri = url.to_string().parse()?;
-            let response = http_client.get(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<KeyValueInfo>(&body) {
-                    Ok(data) => Ok(Response { data, cluster_info }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                match serde_json::from_slice::<ApiError>(&body) {
-                    Ok(error) => Err(Error::Api(error)),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
+    client
+        .first_ok(move |client, endpoint| {
+            let url = build_url(endpoint, key, Some(&query_params));
+            async move {
+                let response = client.http_client().get(url).send().await?;
+                parse_etcd_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
-    .await
+        })
+        .await
 }
 
 /// Handles all set operations.
-async fn raw_set<C>(client: &Client<C>, key: &str, options: SetOptions<'_>) -> Result<KeyValueInfo>
+async fn raw_set<K>(client: &Client, key: K, options: SetOptions<'_>) -> EtcdKeyValueResult
 where
-    C: Clone + Connect + Send + Sync + 'static,
+    K: AsRef<str>,
 {
-    let mut http_options = vec![];
-
-    if let Some(ref value) = options.value {
-        http_options.push(("value".to_owned(), value.to_string()));
-    }
-
-    if let Some(ref ttl) = options.ttl {
-        http_options.push(("ttl".to_owned(), ttl.to_string()));
-    }
-
-    if let Some(ref dir) = options.dir {
-        http_options.push(("dir".to_owned(), dir.to_string()));
-    }
-
-    let prev_exist = match options.prev_exist {
-        Some(prev_exist) => Some(prev_exist),
-        None => {
-            if options.refresh {
-                Some(true)
-            } else {
-                None
-            }
-        }
-    };
-
-    // If we are calling refresh, we should also ensure we are setting prevExist.
-    if let Some(prev_exist) = prev_exist {
-        http_options.push(("prevExist".to_owned(), prev_exist.to_string()));
-    }
-
-    if options.refresh {
-        http_options.push(("refresh".to_owned(), "true".to_owned()));
-    }
-
-    if let Some(ref conditions) = options.conditions {
-        if conditions.is_empty() {
-            return Err(vec![Error::InvalidConditions]);
-        }
-
-        if let Some(ref modified_index) = conditions.modified_index {
-            http_options.push(("prevIndex".to_owned(), modified_index.to_string()));
-        }
-
-        if let Some(ref value) = conditions.value {
-            http_options.push(("prevValue".to_owned(), value.to_string()));
-        }
-    }
-
-    let http_client = client.http_client().clone();
-    let key = key.to_string();
+    let key = key.as_ref();
     let create_in_order = options.create_in_order;
+    let request_body = options.into_request_body().map_err(|e| vec![e])?;
 
-    first_ok(client.endpoints().to_vec(), move |endpoint| {
-        let http_client = http_client.clone();
-        let key = key.clone();
-        let mut ser = Serializer::new(String::new());
-        ser.extend_pairs(http_options.clone());
-        let body = ser.finish();
+    client
+        .first_ok(move |client, endpoint| {
+            let request_body = request_body.clone();
 
-        async move {
-            let uri = build_uri(&endpoint, &key)?;
-            let response = if create_in_order {
-                http_client.post(uri, body).await?
-            } else {
-                http_client.put(uri, body).await?
-            };
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            match status {
-                StatusCode::CREATED | StatusCode::OK => {
-                    match serde_json::from_slice::<KeyValueInfo>(&body) {
-                        Ok(data) => Ok(Response { data, cluster_info }),
-                        Err(error) => Err(Error::Serialization(error)),
-                    }
-                }
-                _ => match serde_json::from_slice::<ApiError>(&body) {
-                    Ok(error) => Err(Error::Api(error)),
-                    Err(error) => Err(Error::Serialization(error)),
-                },
+            async move {
+                let url = build_url(endpoint, key, None);
+                let request = if create_in_order {
+                    client.http_client().post(url)
+                } else {
+                    client.http_client().put(url)
+                };
+                let request = request.header(
+                    http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                );
+                let response = request.body(request_body).send().await?;
+                parse_etcd_response(response, |s| {
+                    s == StatusCode::OK || s == StatusCode::CREATED
+                })
+                .await
             }
-        }
-    })
-    .await
+        })
+        .await
+}
+
+/// Constructs the full URL for an API call.
+fn build_url(endpoint: &Uri, path: &str, query_params: Option<&str>) -> String {
+    if let Some(query_params) = query_params {
+        format!("{}v2/keys{}?{}", endpoint, path, query_params)
+    } else {
+        format!("{}v2/keys{}", endpoint, path)
+    }
 }

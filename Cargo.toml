@@ -1,43 +1,35 @@
 [package]
-authors = ["Jimmy Cuadra <jimmy@jimmycuadra.com>"]
+authors = ["Jimmy Cuadra <jimmy@jimmycuadra.com>", "Jake Heinz <jake@discord.com>"]
 description = "A client library for CoreOS's etcd."
 documentation = "https://docs.rs/etcd"
 edition = "2018"
-homepage = "https://github.com/jimmycuadra/rust-etcd"
+homepage = "https://github.com/discord/rust-etcd"
 keywords = ["etcd", "coreos", "database"]
 license = "MIT"
 name = "etcd"
 readme = "README.md"
-repository = "https://github.com/jimmycuadra/rust-etcd"
+repository = "https://github.com/discord/rust-etcd"
 version = "0.10.0"
 
 [lib]
 test = false
 
 [dependencies]
-futures = "0.3"
-hyper = "0.13"
+bytes = "1.0"
 http = "0.2"
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
-url = "2.1"
-base64 = "0.11"
-log = "0.4"
-tokio = { version = "0.2", features = ["rt-core", "test-util", "macros", "time"] }
-
-[dependencies.hyper-tls]
-optional = true
-version = "0.4"
-
-[dependencies.tokio-tls]
-optional = true
-version = "0.3"
-
-[dependencies.native-tls]
-optional = true
-version = "0.2"
+url = "2.2"
+base64 = "0.13.0"
+log = "0.4.6"
+tokio = "1.4"
+reqwest = { version = "0.11", default_features = false }
+rand = "0.8"
 
 [features]
 default = ["tls"]
-tls = ["hyper-tls", "tokio-tls", "native-tls"]
+tls = ["reqwest/native-tls"]
+
+[dev-dependencies]
+tokio = { version = "1.4", features = ["rt-multi-thread"] }

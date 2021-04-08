@@ -1,3 +1,9 @@
+use url::form_urlencoded::Serializer;
+
+use bytes::Bytes;
+
+use crate::Error;
+
 /// Possible conditions for "compare and delete" and "compare and swap" operations.
 #[derive(Debug)]
 pub struct ComparisonConditions<'a> {
@@ -57,4 +63,121 @@ pub struct SetOptions<'a> {
     pub value: Option<&'a str>,
     /// Whether we should refresh the key, instead of setting it.alloc
     pub refresh: bool,
+}
+
+impl GetOptions {
+    pub(crate) fn into_query_params(self) -> String {
+        let mut serializer = Serializer::new(String::new());
+
+        serializer.append_pair("recursive", bool_to_str(self.recursive));
+
+        if let Some(sort) = self.sort {
+            serializer.append_pair("sorted", bool_to_str(sort));
+        }
+
+        if self.wait {
+            serializer.append_pair("wait", bool_to_str(true));
+        }
+
+        if let Some(wait_index) = self.wait_index {
+            serializer.append_pair("waitIndex", &wait_index.to_string());
+        }
+
+        serializer.finish()
+    }
+}
+
+impl<'a> DeleteOptions<'a> {
+    /// Converts this `DeleteOptions` into a request body for use with the set request.
+    pub(crate) fn into_query_params(self) -> Result<String, Error> {
+        let mut serializer = Serializer::new(String::new());
+
+        if let Some(recursive) = self.recursive {
+            serializer.append_pair("recursive", bool_to_str(recursive));
+        }
+
+        if let Some(dir) = self.dir {
+            serializer.append_pair("dir", bool_to_str(dir));
+        }
+
+        if let Some(conditions) = self.conditions {
+            if conditions.is_empty() {
+                return Err(Error::InvalidConditions);
+            }
+
+            if let Some(modified_index) = conditions.modified_index {
+                serializer.append_pair("prevIndex", &modified_index.to_string());
+            }
+
+            if let Some(value) = conditions.value {
+                serializer.append_pair("prevValue", value);
+            }
+        }
+
+        Ok(serializer.finish())
+    }
+}
+
+impl<'a> SetOptions<'a> {
+    /// Converts this `SetOptions` into a request body for use with the set request.
+    pub(crate) fn into_request_body(self) -> Result<Bytes, Error> {
+        let mut serializer = Serializer::new(String::new());
+
+        if let Some(value) = self.value {
+            serializer.append_pair("value", value);
+        }
+
+        if let Some(ref ttl) = self.ttl {
+            serializer.append_pair("ttl", &ttl.to_string());
+        }
+
+        if let Some(dir) = self.dir {
+            serializer.append_pair("dir", bool_to_str(dir));
+        }
+
+        let prev_exist = match self.prev_exist {
+            Some(prev_exist) => Some(prev_exist),
+            None => {
+                if self.refresh {
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+        };
+
+        // If we are calling refresh, we should also ensure we are setting prevExist.
+        if let Some(prev_exist) = prev_exist {
+            serializer.append_pair("prevExist", bool_to_str(prev_exist));
+        }
+
+        if self.refresh {
+            serializer.append_pair("refresh", bool_to_str(true));
+        }
+
+        if let Some(conditions) = self.conditions {
+            if conditions.is_empty() {
+                return Err(Error::InvalidConditions);
+            }
+
+            if let Some(modified_index) = conditions.modified_index {
+                serializer.append_pair("prevIndex", &modified_index.to_string());
+            }
+
+            if let Some(value) = conditions.value {
+                serializer.append_pair("prevValue", value);
+            }
+        }
+
+        Ok(serializer.finish().into())
+    }
+}
+
+#[inline(always)]
+const fn bool_to_str(b: bool) -> &'static str {
+    if b {
+        "true"
+    } else {
+        "false"
+    }
 }

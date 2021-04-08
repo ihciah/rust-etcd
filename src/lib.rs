@@ -35,7 +35,7 @@
 //!     // Create a client to access a single cluster member. Addresses of multiple cluster
 //!     // members can be provided and the client will try each one in sequence until it
 //!     // receives a successful response.
-//!     let client = Client::new(&["http://etcd.example.com:2379"], None).unwrap();
+//!     let client = Client::new(&["http://etcd.example.com:2379"]);
 //!
 //!     // Set the key "/foo" to the value "bar" with no expiration.
 //!     assert!(kv::set(&client, "/foo", "bar", None).await.is_ok());
@@ -60,7 +60,7 @@
 //! constructor. This feature is enabled by default.
 #![deny(missing_debug_implementations, missing_docs, warnings)]
 
-pub use crate::client::{BasicAuth, Client, ClusterInfo, Health, Response};
+pub use crate::client::{Client, ClientBuilder, ClusterInfo, Health, Response};
 pub use crate::error::{ApiError, Error};
 pub use crate::version::VersionInfo;
 
@@ -71,7 +71,5 @@ pub mod stats;
 
 mod client;
 mod error;
-mod first_ok;
-mod http;
 mod options;
 mod version;

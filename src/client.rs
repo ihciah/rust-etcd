@@ -1,65 +1,44 @@
 //! Contains the etcd client. All API calls are made via the client.
 
-use std::future::Future;
+use std::{future::Future, sync::Arc, time::Duration};
 
-use futures::stream::{self, Stream, StreamExt};
-use http::header::{HeaderMap, HeaderValue};
-use hyper::client::connect::{Connect, HttpConnector};
-use hyper::{Client as Hyper, StatusCode, Uri};
-#[cfg(feature = "tls")]
-use hyper_tls::HttpsConnector;
+use http::{
+    header::{HeaderMap, HeaderValue},
+    StatusCode, Uri,
+};
 use log::error;
+use rand::{prelude::SliceRandom, thread_rng};
+use reqwest::{Certificate, Identity, IntoUrl};
 use serde::de::DeserializeOwned;
 use serde_derive::{Deserialize, Serialize};
 use serde_json;
 
-use crate::error::{ApiError, Error};
-use crate::http::HttpClient;
-use crate::version::VersionInfo;
+use crate::{
+    error::{ApiError, Error},
+    VersionInfo,
+};
 
-// header! {
-//     /// The `X-Etcd-Cluster-Id` header.
-//     (XEtcdClusterId, "X-Etcd-Cluster-Id") => [String]
-// }
 const XETCD_CLUSTER_ID: &str = "X-Etcd-Cluster-Id";
-
-// header! {
-//     /// The `X-Etcd-Index` HTTP header.
-//     (XEtcdIndex, "X-Etcd-Index") => [u64]
-// }
 const XETCD_INDEX: &str = "X-Etcd-Index";
-
-// header! {
-//     /// The `X-Raft-Index` HTTP header.
-//     (XRaftIndex, "X-Raft-Index") => [u64]
-// }
 const XRAFT_INDEX: &str = "X-Raft-Index";
-
-// header! {
-//     /// The `X-Raft-Term` HTTP header.
-//     (XRaftTerm, "X-Raft-Term") => [u64]
-// }
 const XRAFT_TERM: &str = "X-Raft-Term";
 
 /// API client for etcd.
 ///
 /// All API calls require a client.
 #[derive(Clone, Debug)]
-pub struct Client<C>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    endpoints: Vec<Uri>,
-    http_client: HttpClient<C>,
+pub struct Client {
+    endpoints: Arc<Vec<Uri>>,
+    http_client: reqwest::Client,
 }
 
 /// A username and password to use for HTTP basic authentication.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct BasicAuth {
+struct BasicAuth {
     /// The username to use for authentication.
-    pub username: String,
+    username: String,
     /// The password to use for authentication.
-    pub password: String,
+    password: String,
 }
 
 /// A value returned by the health check API endpoint to indicate a healthy cluster member.
@@ -69,147 +48,260 @@ pub struct Health {
     pub health: String,
 }
 
-impl Client<HttpConnector> {
-    /// Constructs a new client using the HTTP protocol.
-    ///
-    /// # Parameters
-    ///
-    /// * handle: A handle to the event loop.
-    /// * endpoints: URLs for one or more cluster members. When making an API call, the client will
-    /// make the call to each member in order until it receives a successful respponse.
-    /// * basic_auth: Credentials for HTTP basic authentication.
-    ///
+/// A client builder is used to configure and create a client.
+///
+/// Use with [`ClientBuilder::new`], however if you don't require advanced configuration,
+/// a client can be created with [`Client::new`].
+#[derive(Debug)]
+pub struct ClientBuilder {
+    endpoints: Vec<Uri>,
+    basic_auth: Option<BasicAuth>,
+    connect_timeout: Duration,
+    #[cfg(feature = "tls")]
+    tls_client_identity: Option<Identity>,
+    #[cfg(feature = "tls")]
+    tls_root_certificates: Vec<Certificate>,
+}
+
+impl ClientBuilder {
+    /// Creates a new client builder that can be used to configure and customize the etcd client.
     /// # Errors
     ///
-    /// Fails if no endpoints are provided or if any of the endpoints is an invalid URL.
-    pub fn new(
-        endpoints: &[&str],
-        basic_auth: Option<BasicAuth>,
-    ) -> Result<Client<HttpConnector>, Error> {
-        let hyper = Hyper::builder().keep_alive(true).build_http();
+    /// Panics if no endpoints are provided or if any of the endpoints is an invalid URL.
+    pub fn new(endpoints: &[&str]) -> Self {
+        if endpoints.is_empty() {
+            panic!("invariant: no endpoints provided")
+        }
 
-        Client::custom(hyper, endpoints, basic_auth)
+        let endpoints = endpoints
+            .into_iter()
+            .map(|e| {
+                e.parse()
+                    .expect(&format!("invariant: could not parse endpoint: {}", e))
+            })
+            .collect();
+
+        Self {
+            endpoints,
+            basic_auth: None,
+            connect_timeout: Duration::from_secs(90),
+            #[cfg(feature = "tls")]
+            tls_client_identity: None,
+            #[cfg(feature = "tls")]
+            tls_root_certificates: Vec::new(),
+        }
+    }
+
+    /// Configures the client to use basic auth, with the given username and password.
+    pub fn with_basic_auth(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.basic_auth = Some(BasicAuth {
+            username: username.into(),
+            password: password.into(),
+        });
+        self
+    }
+
+    /// Configures the client to use a specific connect timeout.
+    ///
+    /// The default is 90 seconds.
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    #[cfg(feature = "tls")]
+    /// Uses a specific client certificate ([`Identity`]) for TLS connections to etcd.
+    pub fn with_client_identity(mut self, identity: Identity) -> Self {
+        self.tls_client_identity = Some(identity);
+        self
+    }
+
+    #[cfg(feature = "tls")]
+    /// Adds a specific root certificate that will be accepted by the client.
+    ///
+    /// Useful if your etcd server is using TLS with self-signed certificates.
+    ///
+    /// NOTE: Calling this function multiple times adds each certificate to the list of
+    /// allowed root certificate authorities.
+    pub fn with_root_certificate(mut self, certificate: Certificate) -> Self {
+        self.tls_root_certificates.push(certificate);
+        self
+    }
+
+    /// Constructs a client from the builder.
+    pub fn build(self) -> Client {
+        let client_builder = reqwest::ClientBuilder::new();
+        let client_builder = client_builder.connect_timeout(self.connect_timeout);
+        let client_builder = match self.basic_auth {
+            Some(auth) => {
+                let mut headers = HeaderMap::new();
+                let basic_auth = base64::encode(format!("{}:{}", auth.username, auth.password));
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Basic {}", basic_auth))
+                        .expect("invariant: could not create basic auth header."),
+                );
+                client_builder.default_headers(headers)
+            }
+            None => client_builder,
+        };
+
+        #[cfg(feature = "tls")]
+        let client_builder = {
+            let client_builder = if let Some(identity) = self.tls_client_identity {
+                client_builder.identity(identity)
+            } else {
+                client_builder
+            };
+
+            self.tls_root_certificates
+                .into_iter()
+                .fold(client_builder, |client_builder, certificate| {
+                    client_builder.add_root_certificate(certificate)
+                })
+        };
+
+        let http_client = client_builder
+            .build()
+            .expect("invariant: could not create http client");
+
+        Client {
+            endpoints: Arc::new(self.endpoints),
+            http_client,
+        }
     }
 }
 
-#[cfg(feature = "tls")]
-impl Client<HttpsConnector<HttpConnector>> {
-    /// Constructs a new client using the HTTPS protocol.
+impl Client {
+    /// Constructs a new client using the HTTP protocol. For more advanced configuration, use [`ClientBuilder`]
     ///
     /// # Parameters
     ///
-    /// * handle: A handle to the event loop.
     /// * endpoints: URLs for one or more cluster members. When making an API call, the client will
     /// make the call to each member in order until it receives a successful respponse.
-    /// * basic_auth: Credentials for HTTP basic authentication.
     ///
     /// # Errors
     ///
-    /// Fails if no endpoints are provided or if any of the endpoints is an invalid URL.
-    pub fn https(
-        endpoints: &[&str],
-        basic_auth: Option<BasicAuth>,
-    ) -> Result<Client<HttpsConnector<HttpConnector>>, Error> {
-        let connector = HttpsConnector::new();
-        let hyper = Hyper::builder().keep_alive(true).build(connector);
-
-        Client::custom(hyper, endpoints, basic_auth)
-    }
-}
-
-impl<C> Client<C>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    /// Constructs a new client using the provided `hyper::Client`.
-    ///
-    /// This method allows the user to configure the details of the underlying HTTP client to their
-    /// liking. It is also necessary when using X.509 client certificate authentication.
-    ///
-    /// # Parameters
-    ///
-    /// * hyper: A fully configured `hyper::Client`.
-    /// * endpoints: URLs for one or more cluster members. When making an API call, the client will
-    /// make the call to each member in order until it receives a successful respponse.
-    /// * basic_auth: Credentials for HTTP basic authentication.
-    ///
-    /// # Errors
-    ///
-    /// Fails if no endpoints are provided or if any of the endpoints is an invalid URL.
-    pub fn custom(
-        hyper: Hyper<C>,
-        endpoints: &[&str],
-        basic_auth: Option<BasicAuth>,
-    ) -> Result<Client<C>, Error> {
-        if endpoints.len() < 1 {
-            return Err(Error::NoEndpoints);
-        }
-
-        let mut uri_endpoints = Vec::with_capacity(endpoints.len());
-
-        for endpoint in endpoints {
-            uri_endpoints.push(endpoint.parse()?);
-        }
-
-        Ok(Client {
-            endpoints: uri_endpoints,
-            http_client: HttpClient::new(hyper, basic_auth),
-        })
+    /// Panics if no endpoints are provided or if any of the endpoints is an invalid URL.
+    pub fn new(endpoints: &[&str]) -> Self {
+        ClientBuilder::new(endpoints).build()
     }
 
     /// Lets other internal code access the `HttpClient`.
-    pub(crate) fn http_client(&self) -> &HttpClient<C> {
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
         &self.http_client
     }
 
-    /// Lets other internal code access the cluster endpoints.
-    pub(crate) fn endpoints(&self) -> &[Uri] {
-        &self.endpoints
-    }
-
     /// Runs a basic health check against each etcd member.
-    pub fn health<'a>(&'a self) -> impl Stream<Item = Result<Response<Health>, Error>> + 'a {
-        stream::iter(self.endpoints.clone())
-            .map(move |endpoint| async move {
-                let uri = build_url(&endpoint, "health")?;
-                self.request(uri).await
-            })
-            .buffer_unordered(self.endpoints.len())
+    pub async fn health(&self) -> Vec<Result<Response<Health>, Error>> {
+        self.request_on_each_endpoint("health").await
     }
 
     /// Returns version information from each etcd cluster member the client was initialized with.
-    pub fn versions<'a>(&'a self) -> impl Stream<Item = Result<Response<VersionInfo>, Error>> + 'a {
-        stream::iter(self.endpoints.clone())
-            .map(move |endpoint| async move {
-                let uri = build_url(&endpoint, "version")?;
-                self.request(uri).await
-            })
-            .buffer_unordered(self.endpoints.len())
+    pub async fn versions(&self) -> Vec<Result<Response<VersionInfo>, Error>> {
+        self.request_on_each_endpoint("version").await
+    }
+
+    fn shuffled_endpoints(&self) -> Vec<&Uri> {
+        // Shallow copy the endpoints, so we can shuffle them.
+        let mut endpoints: Vec<&Uri> = self.endpoints.iter().collect();
+        let mut rng = thread_rng();
+        endpoints.shuffle(&mut rng);
+        endpoints
+    }
+
+    pub(crate) async fn first_ok<'a, H, F, T, E>(&'a self, handler: H) -> Result<T, Vec<E>>
+    where
+        F: Future<Output = Result<T, E>> + 'a,
+        H: Fn(&'a Client, &'a Uri) -> F,
+    {
+        let mut errors = Vec::new();
+
+        for endpoint in self.shuffled_endpoints() {
+            let result = (handler)(&self, endpoint).await;
+            match result {
+                Ok(response) => return Ok(response),
+                Err(err) => errors.push(err),
+            }
+        }
+
+        Err(errors)
+    }
+
+    /// Attempts to issue a GET request to the given path on all endpoints, returning the result of the first successful request.
+    pub(crate) async fn request_first_ok<T, P>(&self, path: P) -> Result<Response<T>, Error>
+    where
+        P: AsRef<str>,
+        T: DeserializeOwned,
+    {
+        let path = path.as_ref();
+        let result = self
+            .first_ok(|client, endpoint| client.request(format!("{}{}", endpoint, path)))
+            .await;
+
+        match result {
+            Ok(response) => Ok(response),
+            Err(errors) => Err(errors
+                .into_iter()
+                .next()
+                .expect("invariant: errors array should never be empty.")),
+        }
+    }
+
+    /// Attempts to issue a GET request to the given path on all endpoints, returning results from each endpoint.
+    pub(crate) async fn request_on_each_endpoint<T, P>(
+        &self,
+        path: P,
+    ) -> Vec<Result<Response<T>, Error>>
+    where
+        P: AsRef<str>,
+        T: DeserializeOwned,
+    {
+        let path = path.as_ref();
+        let mut results = Vec::with_capacity(self.endpoints.len());
+
+        for endpoint in self.endpoints.iter() {
+            let result = self.request(build_url(endpoint, path)).await;
+            results.push(result);
+        }
+
+        results
     }
 
     /// Lets other internal code make basic HTTP requests.
-    pub(crate) fn request<T>(&self, uri: Uri) -> impl Future<Output = Result<Response<T>, Error>>
+    pub(crate) async fn request<T, U>(&self, uri: U) -> Result<Response<T>, Error>
     where
-        T: DeserializeOwned + Send + 'static,
+        U: IntoUrl,
+        T: DeserializeOwned,
     {
-        let http_client = self.http_client.clone();
+        let response = self.http_client.get(uri).send().await?;
+        parse_etcd_response(response, |s| s == StatusCode::OK).await
+    }
+}
 
-        async move {
-            let response = http_client.get(uri).await?;
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<T>(&body) {
-                    Ok(data) => Ok(Response { data, cluster_info }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                match serde_json::from_slice::<ApiError>(&body) {
-                    Ok(error) => Err(Error::Api(error)),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            }
+pub(crate) async fn parse_etcd_response<T>(
+    response: reqwest::Response,
+    status_code_is_success: impl FnOnce(StatusCode) -> bool,
+) -> Result<Response<T>, Error>
+where
+    T: DeserializeOwned,
+{
+    let status_code = response.status();
+    let cluster_info = ClusterInfo::from(response.headers());
+    let body = response.bytes().await?;
+    if status_code_is_success(status_code) {
+        match serde_json::from_slice::<T>(&body) {
+            Ok(data) => Ok(Response { data, cluster_info }),
+            Err(error) => Err(Error::Serialization(error)),
+        }
+    } else {
+        match serde_json::from_slice::<ApiError>(&body) {
+            Ok(error) => Err(Error::Api(error)),
+            Err(error) => Err(Error::Serialization(error)),
         }
     }
 }
@@ -291,15 +383,33 @@ impl<'a> From<&'a HeaderMap<HeaderValue>> for ClusterInfo {
         });
 
         ClusterInfo {
-            cluster_id: cluster_id,
-            etcd_index: etcd_index,
-            raft_index: raft_index,
-            raft_term: raft_term,
+            cluster_id,
+            etcd_index,
+            raft_index,
+            raft_term,
         }
     }
 }
 
+pub(crate) async fn parse_empty_response(
+    response: reqwest::Response,
+) -> Result<Response<()>, Error> {
+    let status_code = response.status();
+    let cluster_info = ClusterInfo::from(response.headers());
+    let body = response.bytes().await?;
+    match status_code {
+        StatusCode::NO_CONTENT | StatusCode::OK => Ok(Response {
+            data: (),
+            cluster_info,
+        }),
+        _ => match serde_json::from_slice::<ApiError>(&body) {
+            Ok(error) => Err(Error::Api(error)),
+            Err(error) => Err(Error::Serialization(error)),
+        },
+    }
+}
+
 /// Constructs the full URL for the versions API call.
-fn build_url(endpoint: &Uri, path: &str) -> Result<Uri, http::uri::InvalidUri> {
-    format!("{}{}", endpoint, path).parse()
+fn build_url(endpoint: &Uri, path: &str) -> String {
+    format!("{}{}", endpoint, path)
 }

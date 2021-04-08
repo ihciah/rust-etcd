@@ -1,27 +1,24 @@
-use futures::stream::StreamExt;
-
 use crate::test::TestClient;
 
 mod test;
 
-#[tokio::test]
-async fn health() {
+#[test]
+fn health() {
     let client = TestClient::no_destructor();
-    let mut health = client.health();
+    let responses = client.run(|c| c.health());
 
-    while let Some(response) = health.next().await {
+    for response in responses {
         assert_eq!(response.unwrap().data.health, "true");
     }
 }
 
-#[tokio::test]
-async fn versions() {
+#[test]
+fn versions() {
     let client = TestClient::no_destructor();
-    let mut versions = client.versions();
+    let responses = client.run(|c| c.versions());
 
-    while let Some(response) = versions.next().await {
+    for response in responses {
         let response = response.unwrap();
-
         assert_eq!(response.data.cluster_version, "2.3.0");
         assert_eq!(response.data.server_version, "2.3.8");
     }

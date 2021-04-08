@@ -4,11 +4,11 @@ use crate::test::TestClient;
 
 mod test;
 
-#[tokio::test]
-async fn list() {
+#[test]
+fn list() {
     let client = TestClient::no_destructor();
-    let members = members::list(&client).await.unwrap().data;
+    let res = client.run(|c| members::list(c)).unwrap();
+    let members = res.data;
     let member = &members[0];
-
     assert_eq!(member.name, "default");
 }

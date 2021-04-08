@@ -2,15 +2,13 @@
 //!
 //! These API endpoints are used to manage users and roles.
 
-use hyper::client::connect::Connect;
-use hyper::{StatusCode, Uri};
+use http::{StatusCode, Uri};
+use serde::de::DeserializeOwned;
 use serde_derive::{Deserialize, Serialize};
 use serde_json;
-use std::future::Future;
 
-use crate::client::{Client, ClusterInfo, Response};
-use crate::error::{ApiError, Error};
-use crate::first_ok::{first_ok, Result};
+use crate::client::{parse_empty_response, Client, ClusterInfo, Response};
+use crate::error::Error;
 
 /// The structure returned by the `GET /v2/auth/enable` endpoint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -411,425 +409,293 @@ impl Permission {
     }
 }
 
+type EtcdAuthResult<T> = Result<Response<T>, Vec<Error>>;
+
 /// Creates a new role.
-pub fn create_role<C>(client: &Client<C>, role: Role) -> impl Future<Output = Result<Role>>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    let http_client = client.http_client().clone();
+pub async fn create_role(client: &Client, role: Role) -> EtcdAuthResult<Role> {
+    let body = serde_json::to_string(&role).map_err(|e| vec![e.into()])?;
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let role = role.clone();
-
-        async move {
-            let body = serde_json::to_string(&role)?;
-            let uri = build_uri(&member, &format!("/roles/{}", role.name))?;
-            let response = http_client.put(uri, body).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            match status {
-                StatusCode::OK | StatusCode::CREATED => {
-                    match serde_json::from_slice::<Role>(&body) {
-                        Ok(data) => Ok(Response { data, cluster_info }),
-                        Err(error) => Err(Error::Serialization(error)),
-                    }
-                }
-                status => Err(Error::UnexpectedStatus(status)),
+    client
+        .first_ok(|client, endpoint| {
+            let body = body.clone();
+            let url = build_url(endpoint, &format!("/roles/{}", role.name));
+            async move {
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
+                parse_auth_response(response, |s| {
+                    s == StatusCode::OK || s == StatusCode::CREATED
+                })
+                .await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Creates a new user.
-pub fn create_user<C>(client: &Client<C>, user: NewUser) -> impl Future<Output = Result<User>>
-where
-    C: Clone + Connect + Send + Sync + 'static,
-{
-    let http_client = client.http_client().clone();
+pub async fn create_user(client: &Client, user: NewUser) -> EtcdAuthResult<User> {
+    let body = serde_json::to_string(&user).map_err(|e| vec![e.into()])?;
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let user = user.clone();
-
-        async move {
-            let body = serde_json::to_string(&user)?;
-            let uri = build_uri(&member, &format!("/users/{}", user.name))?;
-            let response = http_client.put(uri, body).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            match status {
-                StatusCode::OK | StatusCode::CREATED => {
-                    match serde_json::from_slice::<User>(&body) {
-                        Ok(data) => Ok(Response { data, cluster_info }),
-                        Err(error) => Err(Error::Serialization(error)),
-                    }
-                }
-                status => Err(Error::UnexpectedStatus(status)),
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, &format!("/users/{}", user.name));
+            let body = body.clone();
+            async move {
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
+                parse_auth_response(response, |s| {
+                    s == StatusCode::OK || s == StatusCode::CREATED
+                })
+                .await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Deletes a role.
-pub fn delete_role<C, N>(client: &Client<C>, name: N) -> impl Future<Output = Result<()>>
+pub async fn delete_role<N>(client: &Client, role_name: N) -> EtcdAuthResult<()>
 where
-    C: Clone + Connect + Sync + Send + 'static,
-    N: Into<String>,
+    N: AsRef<str>,
 {
-    let http_client = client.http_client().clone();
-    let name = name.into();
+    let role_name = role_name.as_ref();
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let name = name.clone();
-
-        async move {
-            let uri = build_uri(&member, &format!("/roles/{}", name))?;
-            let response = http_client.delete(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-
-            match status {
-                StatusCode::OK => Ok(Response {
-                    data: (),
-                    cluster_info,
-                }),
-                status => Err(Error::UnexpectedStatus(status)),
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, &format!("/roles/{}", role_name));
+            async move {
+                let response = client.http_client().delete(url).send().await?;
+                parse_empty_response(response).await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Deletes a user.
-pub fn delete_user<C, N>(client: &Client<C>, name: N) -> impl Future<Output = Result<()>>
+pub async fn delete_user<N>(client: &Client, user_name: N) -> EtcdAuthResult<()>
 where
-    C: Clone + Connect + Sync + Send + 'static,
-    N: Into<String>,
+    N: AsRef<str>,
 {
-    let http_client = client.http_client().clone();
-    let name = name.into();
-
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let name = name.clone();
-
-        async move {
-            let uri = build_uri(&member, &format!("/users/{}", name))?;
-            let response = http_client.delete(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-
-            match status {
-                StatusCode::OK => Ok(Response {
-                    data: (),
-                    cluster_info,
-                }),
-                status => Err(Error::UnexpectedStatus(status)),
+    let user_name = user_name.as_ref();
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, &format!("/users/{}", user_name));
+            async move {
+                let response = client.http_client().delete(url).send().await?;
+                parse_empty_response(response).await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Attempts to disable the auth system.
-pub fn disable<C>(client: &Client<C>) -> impl Future<Output = Result<AuthChange>>
-where
-    C: Clone + Connect + Send + Sync + 'static,
-{
-    let http_client = client.http_client().clone();
-
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-
-        async move {
-            let uri = build_uri(&member, "/enable")?;
-            let response = http_client.delete(uri).await?;
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-
-            match status {
-                StatusCode::OK => Ok(Response {
-                    data: AuthChange::Changed,
-                    cluster_info,
-                }),
-                StatusCode::CONFLICT => Ok(Response {
-                    data: AuthChange::Unchanged,
-                    cluster_info,
-                }),
-                _ => Err(Error::UnexpectedStatus(status)),
+pub async fn disable(client: &Client) -> EtcdAuthResult<AuthChange> {
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, "/enable");
+            async move {
+                let response = client.http_client().delete(url).send().await?;
+                parse_auth_change_response(response)
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Attempts to enable the auth system.
-pub fn enable<C>(client: &Client<C>) -> impl Future<Output = Result<AuthChange>>
-where
-    C: Clone + Connect + Send + Sync + 'static,
-{
-    let http_client = client.http_client().clone();
-
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-
-        async move {
-            let uri = build_uri(&member, "/enable")?;
-            let response = http_client.put(uri, "".to_owned()).await?;
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-
-            match status {
-                StatusCode::OK => Ok(Response {
-                    data: AuthChange::Changed,
-                    cluster_info,
-                }),
-                StatusCode::CONFLICT => Ok(Response {
-                    data: AuthChange::Unchanged,
-                    cluster_info,
-                }),
-                _ => Err(Error::UnexpectedStatus(status)),
+pub async fn enable(client: &Client) -> EtcdAuthResult<AuthChange> {
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, "/enable");
+            async move {
+                let response = client.http_client().put(url).send().await?;
+                parse_auth_change_response(response)
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Get a role.
-pub fn get_role<C, N>(client: &Client<C>, name: N) -> impl Future<Output = Result<Role>>
+pub async fn get_role<N>(client: &Client, role_name: N) -> EtcdAuthResult<Role>
 where
-    C: Clone + Connect + Sync + Send + 'static,
-    N: Into<String>,
+    N: AsRef<str>,
 {
-    let http_client = client.http_client().clone();
-    let name = name.into();
+    let role_name = role_name.as_ref();
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let name = name.clone();
-
-        async move {
-            let uri = build_uri(&member, &format!("/roles/{}", name))?;
-            let response = http_client.get(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<Role>(&body) {
-                    Ok(data) => Ok(Response { data, cluster_info }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                Err(Error::UnexpectedStatus(status))
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, &format!("/roles/{}", role_name));
+            async move {
+                let response = client.http_client().get(url).send().await?;
+                parse_auth_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
+        })
+        .await
 }
 
-/// Gets all roles.
-pub fn get_roles<C>(client: &Client<C>) -> impl Future<Output = Result<Vec<Role>>>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    let http_client = client.http_client().clone();
-
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-
-        async move {
-            let uri = build_uri(&member, "/roles")?;
-            let response = http_client.get(uri).await?;
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<Roles>(&body) {
-                    Ok(roles) => {
-                        let data = roles.roles.unwrap_or_default();
-
-                        Ok(Response { data, cluster_info })
-                    }
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                Err(Error::UnexpectedStatus(status))
+/// Get a role.
+pub async fn get_roles<N>(client: &Client) -> EtcdAuthResult<Vec<Role>> {
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, "/roles");
+            async move {
+                let response = client.http_client().get(url).send().await?;
+                parse_auth_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Get a user.
-pub fn get_user<C, N>(client: &Client<C>, name: N) -> impl Future<Output = Result<UserDetail>>
+pub async fn get_user<N>(client: &Client, user_name: N) -> EtcdAuthResult<User>
 where
-    C: Clone + Connect + Sync + Send + 'static,
-    N: Into<String>,
+    N: AsRef<str>,
 {
-    let http_client = client.http_client().clone();
-    let name = name.into();
+    let user_name = user_name.as_ref();
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let name = name.clone();
-        async move {
-            let uri = build_uri(&member, &format!("/users/{}", name))?;
-            let response = http_client.get(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<UserDetail>(&body) {
-                    Ok(data) => Ok(Response { data, cluster_info }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                Err(Error::UnexpectedStatus(status))
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, &format!("/users/{}", user_name));
+            async move {
+                let response = client.http_client().get(url).send().await?;
+                parse_auth_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Gets all users.
-pub fn get_users<C>(client: &Client<C>) -> impl Future<Output = Result<Vec<UserDetail>>>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    let http_client = client.http_client().clone();
-
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        async move {
-            let uri = build_uri(&member, "/users")?;
-            let response = http_client.get(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<Users>(&body) {
-                    Ok(users) => {
-                        let data = users.users.unwrap_or_default();
-
-                        Ok(Response { data, cluster_info })
-                    }
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                Err(Error::UnexpectedStatus(status))
+pub async fn get_users<N>(client: &Client) -> EtcdAuthResult<Vec<User>> {
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, "/users");
+            async move {
+                let response = client.http_client().get(url).send().await?;
+                parse_auth_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Determines whether or not the auth system is enabled.
-pub fn status<C>(client: &Client<C>) -> impl Future<Output = Result<bool>>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    let http_client = client.http_client().clone();
+pub async fn status(client: &Client) -> EtcdAuthResult<bool> {
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, "/enable");
+            async move {
+                let response = client.http_client().get(url).send().await?;
+                let response: Response<AuthStatus> =
+                    parse_auth_response(response, |s| s == StatusCode::OK).await?;
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        async move {
-            let uri = build_uri(&member, "/enable")?;
-            let response = http_client.get(uri).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<AuthStatus>(&body) {
-                    Ok(data) => Ok(Response {
-                        data: data.enabled,
-                        cluster_info,
-                    }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                match serde_json::from_slice::<ApiError>(&body) {
-                    Ok(error) => Err(Error::Api(error)),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
+                Ok(Response {
+                    cluster_info: response.cluster_info,
+                    data: response.data.enabled,
+                })
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Updates an existing role.
-pub fn update_role<C>(client: &Client<C>, role: RoleUpdate) -> impl Future<Output = Result<Role>>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    let http_client = client.http_client().clone();
+pub async fn update_role(client: &Client, role: RoleUpdate) -> EtcdAuthResult<Role> {
+    let body = serde_json::to_string(&role).map_err(|e| vec![e.into()])?;
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let role = role.clone();
-
-        async move {
-            let body = serde_json::to_string(&role)?;
-            let uri = build_uri(&member, &format!("/roles/{}", role.name))?;
-            let response = http_client.put(uri, body).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<Role>(&body) {
-                    Ok(data) => Ok(Response { data, cluster_info }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                Err(Error::UnexpectedStatus(status))
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, &format!("/roles/{}", role.name));
+            let body = body.clone();
+            async move {
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
+                parse_auth_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
+        })
+        .await
 }
-/// Updates an existing user.
-pub fn update_user<C>(client: &Client<C>, user: UserUpdate) -> impl Future<Output = Result<User>>
-where
-    C: Clone + Connect + Sync + Send + 'static,
-{
-    let http_client = client.http_client().clone();
 
-    first_ok(client.endpoints().to_vec(), move |member| {
-        let http_client = http_client.clone();
-        let user = user.clone();
+/// Updates an existing user
+pub async fn update_user(client: &Client, user: UserUpdate) -> EtcdAuthResult<User> {
+    let body = serde_json::to_string(&user).map_err(|e| vec![e.into()])?;
 
-        async move {
-            let body = serde_json::to_string(&user)?;
-            let uri = build_uri(&member, &format!("/users/{}", user.name))?;
-            let response = http_client.put(uri, body).await?;
-
-            let status = response.status();
-            let cluster_info = ClusterInfo::from(response.headers());
-            let body = hyper::body::to_bytes(response).await?;
-
-            if status == StatusCode::OK {
-                match serde_json::from_slice::<User>(&body) {
-                    Ok(data) => Ok(Response { data, cluster_info }),
-                    Err(error) => Err(Error::Serialization(error)),
-                }
-            } else {
-                Err(Error::UnexpectedStatus(status))
+    client
+        .first_ok(|client, endpoint| {
+            let url = build_url(endpoint, &format!("/users/{}", user.name));
+            let body = body.clone();
+            async move {
+                let response = client
+                    .http_client()
+                    .put(url)
+                    .body(body)
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .send()
+                    .await?;
+                parse_auth_response(response, |s| s == StatusCode::OK).await
             }
-        }
-    })
+        })
+        .await
 }
 
 /// Constructs the full URL for an API call.
-fn build_uri(endpoint: &Uri, path: &str) -> std::result::Result<Uri, http::uri::InvalidUri> {
-    format!("{}v2/auth{}", endpoint, path).parse()
+fn build_url(endpoint: &Uri, path: &str) -> String {
+    format!("{}v2/auth{}", endpoint, path)
+}
+
+async fn parse_auth_response<T>(
+    response: reqwest::Response,
+    status_code_is_success: impl FnOnce(StatusCode) -> bool,
+) -> Result<Response<T>, Error>
+where
+    T: DeserializeOwned,
+{
+    let status_code = response.status();
+    let cluster_info = ClusterInfo::from(response.headers());
+    let body = response.bytes().await?;
+    if status_code_is_success(status_code) {
+        match serde_json::from_slice::<T>(&body) {
+            Ok(data) => Ok(Response { data, cluster_info }),
+            Err(error) => Err(Error::Serialization(error)),
+        }
+    } else {
+        Err(Error::UnexpectedStatus(status_code))
+    }
+}
+
+fn parse_auth_change_response(response: reqwest::Response) -> Result<Response<AuthChange>, Error> {
+    let status = response.status();
+    let cluster_info = ClusterInfo::from(response.headers());
+    match status {
+        StatusCode::OK => Ok(Response {
+            data: AuthChange::Changed,
+            cluster_info,
+        }),
+        StatusCode::CONFLICT => Ok(Response {
+            data: AuthChange::Unchanged,
+            cluster_info,
+        }),
+        _ => Err(Error::UnexpectedStatus(status)),
+    }
 }

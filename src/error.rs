@@ -4,12 +4,10 @@ use std::convert::From;
 use std::error::Error as StdError;
 use std::fmt::{Display, Error as FmtError, Formatter};
 
-use http::uri::InvalidUri;
-use hyper::{Error as HttpError, StatusCode};
-#[cfg(feature = "tls")]
-use native_tls::Error as TlsError;
+use http::{uri::InvalidUri, StatusCode};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Error as SerializationError;
+use tokio::time::error::Elapsed;
 use url::ParseError as UrlError;
 
 /// An error returned by an etcd API endpoint.
@@ -47,7 +45,7 @@ pub enum Error {
     /// An error returned by an etcd API endpoint.
     Api(ApiError),
     /// An error at the HTTP protocol layer.
-    Http(HttpError),
+    Http(reqwest::Error),
     /// An error returned when invalid conditions have been provided for a compare-and-delete or
     /// compare-and-swap operation.
     InvalidConditions,
@@ -59,9 +57,6 @@ pub enum Error {
     NoEndpoints,
     /// An error returned when attempting to deserializing invalid JSON.
     Serialization(SerializationError),
-    /// An error returned when configuring TLS.
-    #[cfg(feature = "tls")]
-    Tls(TlsError),
     /// An error returned when an unexpected HTTP status code is returned by the server.
     UnexpectedStatus(StatusCode),
 }
@@ -75,8 +70,6 @@ impl Display for Error {
             Error::InvalidUri(ref error) => write!(f, "{}", error),
             Error::InvalidUrl(ref error) => write!(f, "{}", error),
             ref error @ Error::NoEndpoints => write!(f, "{}", error.to_string()),
-            #[cfg(feature = "tls")]
-            Error::Tls(ref error) => write!(f, "{}", error),
             Error::Serialization(ref error) => write!(f, "{}", error),
             Error::UnexpectedStatus(ref status) => write!(
                 f,
@@ -96,24 +89,15 @@ impl StdError for Error {
             Error::InvalidUri(_) => "a supplied endpoint could not be parsed as a URI",
             Error::InvalidUrl(_) => "a URL for the request could not be generated",
             Error::NoEndpoints => "at least one endpoint is required to create a Client",
-            #[cfg(feature = "tls")]
-            Error::Tls(_) => "an error occurred configuring TLS",
             Error::Serialization(_) => "an error occurred deserializing JSON",
             Error::UnexpectedStatus(_) => "the etcd server returned an unexpected HTTP status code",
         }
     }
 }
 
-impl From<HttpError> for Error {
-    fn from(error: HttpError) -> Error {
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Error {
         Error::Http(error)
-    }
-}
-
-#[cfg(feature = "tls")]
-impl From<TlsError> for Error {
-    fn from(error: TlsError) -> Error {
-        Error::Tls(error)
     }
 }
 
@@ -142,6 +126,12 @@ pub enum WatchError {
     Other(Vec<Error>),
     /// The supplied timeout was reached before any request successfully completed.
     Timeout,
+}
+
+impl From<Elapsed> for WatchError {
+    fn from(_: Elapsed) -> Self {
+        WatchError::Timeout
+    }
 }
 
 impl Display for WatchError {

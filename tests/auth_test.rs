@@ -1,73 +1,122 @@
-use etcd::auth::{self, AuthChange, NewUser, Role, RoleUpdate, UserUpdate};
-use etcd::{BasicAuth, Client};
+use crate::test::TestClient;
+use etcd::{
+    auth::{self, AuthChange, NewUser, Role, RoleUpdate, UserUpdate},
+    ClientBuilder,
+};
 
-#[tokio::test]
-async fn auth() {
-    let client = Client::new(&["http://etcd:2379"], None).unwrap();
+mod test;
 
-    let basic_auth = BasicAuth {
-        username: "root".into(),
-        password: "secret".into(),
-    };
+#[test]
+fn auth() {
+    let test_client = TestClient::no_destructor();
+    let authed_client = ClientBuilder::new(&["http://etcd:2379"])
+        .with_basic_auth("root", "secret")
+        .build();
 
-    let authed_client = Client::new(&["http://etcd:2379"], Some(basic_auth)).unwrap();
+    // Check that auth is disabled first.
+    {
+        let response = test_client.run(|c| auth::status(c)).unwrap();
+        assert_eq!(response.data, false);
+    }
 
-    let root_user = NewUser::new("root", "secret");
+    // Create a new user.
+    {
+        let root_user = NewUser::new("root", "secret");
+        let response = test_client
+            .run(|c| auth::create_user(c, root_user))
+            .unwrap();
 
-    let response = auth::status(&client).await.unwrap();
-    assert_eq!(response.data, false);
+        assert_eq!(response.data.name(), "root");
+    }
 
-    let response = auth::create_user(&client, root_user).await.unwrap();
-    assert_eq!(response.data.name(), "root");
+    // Enable auth:
+    {
+        let response = test_client.run(|c| auth::enable(c)).unwrap();
+        assert_eq!(response.data, AuthChange::Changed);
+    }
 
-    let response = auth::enable(&client).await.unwrap();
-    assert_eq!(response.data, AuthChange::Changed);
+    // Update role:
+    {
+        let mut update_guest = RoleUpdate::new("guest");
+        update_guest.revoke_kv_write_permission("/*");
+        test_client
+            .run(|_| auth::update_role(&authed_client, update_guest))
+            .unwrap();
+    }
 
-    let mut update_guest = RoleUpdate::new("guest");
-    update_guest.revoke_kv_write_permission("/*");
-    auth::update_role(&authed_client, update_guest)
-        .await
-        .unwrap();
+    // Update another role:
+    {
+        let mut rkt_role = Role::new("rkt");
+        rkt_role.grant_kv_read_permission("/rkt/*");
+        rkt_role.grant_kv_write_permission("/rkt/*");
+        test_client
+            .run(|_| auth::create_role(&authed_client, rkt_role))
+            .unwrap();
+    }
 
-    let mut rkt_role = Role::new("rkt");
-    rkt_role.grant_kv_read_permission("/rkt/*");
-    rkt_role.grant_kv_write_permission("/rkt/*");
-    auth::create_role(&authed_client, rkt_role).await.unwrap();
+    // Create a new user:
+    {
+        let mut rkt_user = NewUser::new("rkt", "secret");
+        rkt_user.add_role("rkt");
+        let response = test_client
+            .run(|_| auth::create_user(&authed_client, rkt_user))
+            .unwrap();
 
-    let mut rkt_user = NewUser::new("rkt", "secret");
-    rkt_user.add_role("rkt");
-    let response = auth::create_user(&authed_client, rkt_user).await.unwrap();
-    assert_eq!(response.data.name(), "rkt");
-    let role_name = &response.data.role_names()[0];
-    assert_eq!(role_name, "rkt");
+        let rkt_user = response.data;
+        assert_eq!(rkt_user.name(), "rkt");
+        let role_name = &rkt_user.role_names()[0];
+        assert_eq!(role_name, "rkt");
+    }
 
-    let mut update_rkt_user = UserUpdate::new("rkt");
-    update_rkt_user.update_password("secret2");
-    update_rkt_user.grant_role("root");
-    auth::update_user(&authed_client, update_rkt_user)
-        .await
-        .unwrap();
+    // Update our user:
+    {
+        let mut update_rkt_user = UserUpdate::new("rkt");
 
-    let response = auth::get_role(&authed_client, "rkt").await.unwrap();
-    assert!(response
-        .data
-        .kv_read_permissions()
-        .contains(&"/rkt/*".to_owned()));
-    assert!(response
-        .data
-        .kv_write_permissions()
-        .contains(&"/rkt/*".to_owned()));
+        update_rkt_user.update_password("secret2");
+        update_rkt_user.grant_role("root");
+        test_client
+            .run(|_| auth::update_user(&authed_client, update_rkt_user))
+            .unwrap();
+    }
 
-    auth::delete_user(&authed_client, "rkt").await.unwrap();
+    // Read the role back:
+    {
+        let response = test_client
+            .run(|_| auth::get_role(&&authed_client, "rkt"))
+            .unwrap();
+        let role = response.data;
+        assert!(role.kv_read_permissions().contains(&"/rkt/*".to_owned()));
+        assert!(role.kv_write_permissions().contains(&"/rkt/*".to_owned()));
+    }
 
-    auth::delete_role(&authed_client, "rkt").await.unwrap();
+    // Delete the user & role:
+    {
+        test_client
+            .run(|_| auth::delete_user(&authed_client, "rkt"))
+            .unwrap();
+        test_client
+            .run(|_| auth::delete_role(&authed_client, "rkt"))
+            .unwrap();
+    }
 
-    let mut update_guest = RoleUpdate::new("guest");
-    update_guest.grant_kv_write_permission("/*");
-    auth::update_role(&authed_client, update_guest)
-        .await
-        .unwrap();
+    // Update guest role:
+    {
+        let mut update_guest = RoleUpdate::new("guest");
+        update_guest.grant_kv_write_permission("/*");
+        test_client
+            .run(|_| auth::update_role(&authed_client, update_guest))
+            .unwrap();
+    }
 
-    let response = auth::disable(&authed_client).await.unwrap();
-    assert_eq!(response.data, AuthChange::Changed);
+    // Disable auth:
+    {
+        let response = test_client.run(|_| auth::disable(&authed_client)).unwrap();
+        assert_eq!(response.data, AuthChange::Changed);
+    }
+
+    // Check that auth is disabled, using unauthorized client:
+    {
+        let response = test_client.run(|c| auth::status(c)).unwrap();
+        assert_eq!(response.data, false);
+    }
 }
