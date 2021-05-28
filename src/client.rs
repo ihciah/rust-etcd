@@ -56,6 +56,8 @@ pub struct Health {
 pub struct ClientBuilder {
     endpoints: Vec<Uri>,
     basic_auth: Option<BasicAuth>,
+    tcp_keepalive: Option<Duration>,
+    request_timeout: Option<Duration>,
     connect_timeout: Duration,
     #[cfg(feature = "tls")]
     tls_client_identity: Option<Identity>,
@@ -85,6 +87,8 @@ impl ClientBuilder {
             endpoints,
             basic_auth: None,
             connect_timeout: Duration::from_secs(90),
+            tcp_keepalive: None,
+            request_timeout: None,
             #[cfg(feature = "tls")]
             tls_client_identity: None,
             #[cfg(feature = "tls")]
@@ -110,6 +114,19 @@ impl ClientBuilder {
     /// The default is 90 seconds.
     pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
+        self
+    }
+
+    /// Configures the underlying http client to use `SO_KEEPALIVE` with the
+    /// supplied duration.
+    pub fn with_tcp_keepalive(mut self, timeout: Duration) -> Self {
+        self.tcp_keepalive = Some(timeout);
+        self
+    }
+
+    /// Configures the client to have a request timeout (doesn't affect kv::watch calls).
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
         self
     }
 
@@ -147,6 +164,14 @@ impl ClientBuilder {
                 );
                 client_builder.default_headers(headers)
             }
+            None => client_builder,
+        };
+        let client_builder = match self.request_timeout {
+            Some(timeout) => client_builder.timeout(timeout),
+            None => client_builder,
+        };
+        let client_builder = match self.tcp_keepalive {
+            Some(timeout) => client_builder.tcp_keepalive(timeout),
             None => client_builder,
         };
 

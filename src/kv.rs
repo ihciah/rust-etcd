@@ -601,6 +601,7 @@ async fn raw_get<K>(client: &Client, key: K, options: InternalGetOptions) -> Etc
 where
     K: AsRef<str>,
 {
+    let wait = options.wait;
     let query_params = options.into_query_params();
     let key = key.as_ref();
 
@@ -608,7 +609,15 @@ where
         .first_ok(move |client, endpoint| {
             let url = build_url(endpoint, key, Some(&query_params));
             async move {
-                let response = client.http_client().get(url).send().await?;
+                let request = client.http_client().get(url);
+                let request = if wait {
+                    // Since `reqwest` doesn't let us specify a timeout, we'll set an arbitrary
+                    // large amount of requests.
+                    request.timeout(Duration::from_secs(60 * 60 * 24))
+                } else {
+                    request
+                };
+                let response = request.send().await?;
                 parse_etcd_response(response, |s| s == StatusCode::OK).await
             }
         })
