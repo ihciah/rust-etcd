@@ -52,7 +52,7 @@ pub struct Health {
 ///
 /// Use with [`ClientBuilder::new`], however if you don't require advanced configuration,
 /// a client can be created with [`Client::new`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ClientBuilder {
     endpoints: Vec<Uri>,
     basic_auth: Option<BasicAuth>,
